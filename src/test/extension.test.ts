@@ -468,6 +468,10 @@ suite('Extension Test Suite', () => {
 		assert.ok(roots.hooksRoot.includes('.cursor'), 'hooksRoot should be under .cursor');
 		assert.ok(roots.mcpRoot.includes('.cursor'), 'mcpRoot should be under .cursor');
 		assert.ok(roots.lspRoot.includes('.cursor'), 'lspRoot should be under .cursor');
+		assert.ok(roots.commandsRoot.includes('.cursor'), 'commandsRoot should be under .cursor');
+		assert.ok(roots.toolsRoot.includes('.cursor'), 'toolsRoot should be under .cursor');
+		assert.ok(roots.promptsRoot.includes('.cursor'), 'promptsRoot should be under .cursor');
+		assert.ok(roots.workflowsRoot.includes('.cursor'), 'workflowsRoot should be under .cursor');
 	});
 
 	test('resolveWorkspaceComponentRoots returns legacy paths for vscode host', () => {
@@ -475,6 +479,10 @@ suite('Extension Test Suite', () => {
 		assert.ok(roots.skillsRoot.includes('.agents'), 'skillsRoot should be under .agents on legacy host');
 		assert.ok(roots.agentsRoot.includes('.github'), 'agentsRoot should be under .github on legacy host');
 		assert.ok(roots.hooksRoot.includes('.github'), 'hooksRoot should be under .github on legacy host');
+		assert.ok(roots.commandsRoot.includes('.github'), 'commandsRoot should be under .github on legacy host');
+		assert.ok(roots.toolsRoot.includes('.github'), 'toolsRoot should be under .github on legacy host');
+		assert.ok(roots.promptsRoot.includes('.github'), 'promptsRoot should be under .github on legacy host');
+		assert.ok(roots.workflowsRoot.includes('.github'), 'workflowsRoot should be under .github on legacy host');
 		assert.strictEqual(roots.rulesRoot, '', 'rulesRoot should be empty on legacy host');
 	});
 

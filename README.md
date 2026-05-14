@@ -21,10 +21,11 @@ Alternative full-screen marketplace browser built with standard VS Code UI eleme
 
 ### Marketplace URL Resolution
 
-Supports both:
+Supports:
 
 - GitHub `owner/repo` shorthand (for example, `anthropics/skills`), expanded to `https://github.com/owner/repo`
 - Repository URLs (e.g., `https://github.com/anthropics/skills`) resolved to `.claude-plugin/marketplace.json`
+- Repository URLs other than Github (e.g https://myorg@dev.azure.com/myproject/\_git/internal-plugin-market)
 - Direct marketplace JSON URLs
 
 ### GitHub Authentication
@@ -52,6 +53,9 @@ Click any skill or agent item to open a detailed preview panel with:
 - Hooks: `<workspace>/.github/hooks/...`
 - MCP configs: `<workspace>/.github/mcp/...`
 - LSP configs: `<workspace>/.github/lsp/...`
+- Commands, tools, prompts, workflows: `<workspace>/.github/{commands,tools,prompts,workflows}/...` (markdown or bundle directories)
+
+When the extension runs in **Cursor**, workspace installs use **`.cursor/<component>/<plugin-id>/`** for skills, rules, agents, hooks, MCP, LSP, commands, tools, prompts, and workflows instead of the `.agents` / `.github` layout above.
 
 **User scope:**
 
@@ -61,6 +65,7 @@ Click any skill or agent item to open a detailed preview panel with:
 - Hooks: `.../hooks/...`
 - MCP configs: `.../mcp/...`
 - LSP configs: `.../lsp/...`
+- Commands, tools, prompts, workflows: `.../{commands,tools,prompts,workflows}/...`
 - Automatically updates `chat.agentSkillsLocations` and `chat.agentFilesLocations` workspace settings
 
 ### Output Logging
@@ -69,15 +74,15 @@ Detailed logging with configurable log levels.
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `Agent Plugins: Browse Marketplace` | Open the webview marketplace browser |
-| `Agent Plugins: Add Marketplace URL` | Add a new marketplace URL or GitHub `owner/repo` shorthand to settings |
-| `Agent Plugins: Remove Marketplace URL` | Remove a marketplace URL from settings |
-| `Agent Plugins: Refresh` | Refresh the tree view data |
-| `Agent Plugins: Settings` | Open extension settings |
-| `Agent Plugins: Sign In to GitHub` | Authenticate with GitHub for private repo access |
-| `Agent Plugins: GitHub Auth Status` | Check current GitHub authentication status |
+| Command                                 | Description                                                            |
+| --------------------------------------- | ---------------------------------------------------------------------- |
+| `Agent Plugins: Browse Marketplace`     | Open the webview marketplace browser                                   |
+| `Agent Plugins: Add Marketplace URL`    | Add a new marketplace URL or GitHub `owner/repo` shorthand to settings |
+| `Agent Plugins: Remove Marketplace URL` | Remove a marketplace URL from settings                                 |
+| `Agent Plugins: Refresh`                | Refresh the tree view data                                             |
+| `Agent Plugins: Settings`               | Open extension settings                                                |
+| `Agent Plugins: Sign In to GitHub`      | Authenticate with GitHub for private repo access                       |
+| `Agent Plugins: GitHub Auth Status`     | Check current GitHub authentication status                             |
 
 ### Context Menu Actions
 
@@ -87,10 +92,10 @@ Detailed logging with configurable log levels.
 
 ## Extension Settings
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `agentPlugins.marketplaces` | `string[]` | `[]` | List of marketplace.json URLs or GitHub `owner/repo` shorthands to browse |
-| `agentPlugins.logLevel` | `string` | `info` | Log level (`off`, `error`, `warn`, `info`, `debug`, `trace`) |
+| Setting                     | Type       | Default | Description                                                               |
+| --------------------------- | ---------- | ------- | ------------------------------------------------------------------------- |
+| `agentPlugins.marketplaces` | `string[]` | `[]`    | List of marketplace.json URLs or GitHub `owner/repo` shorthands to browse |
+| `agentPlugins.logLevel`     | `string`   | `info`  | Log level (`off`, `error`, `warn`, `info`, `debug`, `trace`)              |
 
 ## Requirements
 

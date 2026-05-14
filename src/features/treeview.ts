@@ -63,6 +63,8 @@ export class MarketplaceTreeDataProvider implements vscode.TreeDataProvider<Tree
     private _marketplaces: MarketplaceNode[] = [];
     private _loading = false;
     private _refreshingInBackground = false;
+    /** Serialize loadData so overlapping calls (e.g. settings change + add flow) do not drop a refresh. */
+    private _loadDataChain: Promise<void> = Promise.resolve();
 
     constructor(private readonly services: ExtensionServices) { }
 
@@ -71,108 +73,117 @@ export class MarketplaceTreeDataProvider implements vscode.TreeDataProvider<Tree
     }
 
     async loadData(options?: { forceRefresh?: boolean }): Promise<void> {
-        if (this._loading) {
-            return;
-        }
-
-        this._loading = true;
-        try {
-            await vscode.window.withProgress(
-                { location: { viewId: 'vscode-agent-plugins.marketplaceExplorer' } },
-                async () => {
-                    const urls = getMarketplaceUrls();
-                    if (urls.length === 0) {
-                        this._marketplaces = [];
-                        this._onDidChangeTreeData.fire();
-                        return;
-                    }
-
-                    const statusBar = this.services.statusBarItem;
-                    const total = urls.length;
-
-                    const getMarketplaceLabel = (url: string): string => {
-                        try {
-                            const parsed = new URL(url);
-                            // Extract owner/repo from GitHub URLs
-                            const pathMatch = /^\/([^/]+\/[^/]+)/.exec(parsed.pathname);
-                            if (pathMatch) {
-                                return pathMatch[1];
-                            }
-                            return parsed.hostname + parsed.pathname.slice(0, 30);
-                        } catch {
-                            return url.slice(0, 40);
-                        }
-                    };
-
-                    statusBar.text = `$(loading~spin) Fetching ${total} marketplace(s)...`;
-                    statusBar.tooltip = 'Agent Plugins: Fetching marketplaces';
-                    statusBar.show();
-                    this.services.logger.info('Status bar shown: Fetching marketplaces...');
-
-                    // Track in-progress fetches
-                    const inProgress = new Set(urls.map(getMarketplaceLabel));
-                    let completedCount = 0;
-
-                    const updateStatusBar = (): void => {
-                        const labels = Array.from(inProgress);
-                        if (labels.length > 0) {
-                            const current = labels[0];
-                            statusBar.text = `$(loading~spin) Fetching ${current} (${completedCount + 1}/${total})`;
-                            statusBar.tooltip = `Agent Plugins: Fetching ${labels.join(', ')}`;
-                        }
-                    };
-
-                    updateStatusBar();
-
-                    const onProgress = (event: FetchProgressEvent): void => {
-                        const urlLabel = getMarketplaceLabel(event.url);
-                        if (event.status === 'completed' || event.status === 'failed') {
-                            completedCount++;
-                            inProgress.delete(urlLabel);
-                            this.services.logger.info(`Progress: ${event.status} ${urlLabel} (${completedCount}/${total})`);
-                            updateStatusBar();
-                        }
-                    };
-
-                    const result = await fetchAllMarketplaces(urls, {
-                        forceRefresh: options?.forceRefresh,
-                        onProgress,
-                        onRefreshComplete: (updated) => {
-                            this._refreshingInBackground = false;
-                            this.updateMarketplacesFromResult(updated, urls);
-                            this.services.logger.info(`Background refresh completed with ${updated.plugins.length} plugin(s).`);
-                        }
-                    });
-
-                    if (result.fromCache) {
-                        statusBar.text = `$(check) Loaded ${result.plugins.length} plugin(s) from cache`;
-                    } else {
-                        statusBar.text = `$(check) Loaded ${result.plugins.length} plugin(s)`;
-                    }
-                    setTimeout(() => statusBar.hide(), 3000);
-
-                    this._refreshingInBackground = result.refreshing ?? false;
-                    this.updateMarketplacesFromResult(result, urls);
-
-                    for (const warning of result.warnings) {
-                        this.services.logger.warn(`[marketplace] ${warning}`);
-                    }
-                    for (const error of result.errors) {
-                        this.services.logger.error(`[marketplace] ${error}`);
-                    }
-
-                    for (const marketplace of this._marketplaces) {
-                        this.services.logger.info(`Marketplace '${marketplace.url}' has ${marketplace.plugins.length} plugin(s).`);
-                    }
-
-                    const cacheNote = result.fromCache ? ' (cached)' : '';
-                    const refreshNote = result.refreshing ? ' - refreshing in background' : '';
-                    this.services.logger.info(`Tree view loaded ${result.plugins.length} plugin(s) from ${urls.length} marketplace(s)${cacheNote}${refreshNote}.`);
+        this._loadDataChain = this._loadDataChain
+            .then(async () => {
+                if (this._loading) {
+                    return;
                 }
-            );
-        } finally {
-            this._loading = false;
-        }
+
+                this._loading = true;
+                try {
+                    await vscode.window.withProgress(
+                        { location: { viewId: 'vscode-agent-plugins.marketplaceExplorer' } },
+                        async () => {
+                        const urls = getMarketplaceUrls();
+                        if (urls.length === 0) {
+                            this._marketplaces = [];
+                            this._onDidChangeTreeData.fire();
+                            return;
+                        }
+
+                        const statusBar = this.services.statusBarItem;
+                        const total = urls.length;
+
+                        const getMarketplaceLabel = (url: string): string => {
+                            try {
+                                const parsed = new URL(url);
+                                // Extract owner/repo from GitHub URLs
+                                const pathMatch = /^\/([^/]+\/[^/]+)/.exec(parsed.pathname);
+                                if (pathMatch) {
+                                    return pathMatch[1];
+                                }
+                                return parsed.hostname + parsed.pathname.slice(0, 30);
+                            } catch {
+                                return url.slice(0, 40);
+                            }
+                        };
+
+                        statusBar.text = `$(loading~spin) Fetching ${total} marketplace(s)...`;
+                        statusBar.tooltip = 'Agent Plugins: Fetching marketplaces';
+                        statusBar.show();
+                        this.services.logger.info('Status bar shown: Fetching marketplaces...');
+
+                        // Track in-progress fetches
+                        const inProgress = new Set(urls.map(getMarketplaceLabel));
+                        let completedCount = 0;
+
+                        const updateStatusBar = (): void => {
+                            const labels = Array.from(inProgress);
+                            if (labels.length > 0) {
+                                const current = labels[0];
+                                statusBar.text = `$(loading~spin) Fetching ${current} (${completedCount + 1}/${total})`;
+                                statusBar.tooltip = `Agent Plugins: Fetching ${labels.join(', ')}`;
+                            }
+                        };
+
+                        updateStatusBar();
+
+                        const onProgress = (event: FetchProgressEvent): void => {
+                            const urlLabel = getMarketplaceLabel(event.url);
+                            if (event.status === 'completed' || event.status === 'failed') {
+                                completedCount++;
+                                inProgress.delete(urlLabel);
+                                this.services.logger.info(`Progress: ${event.status} ${urlLabel} (${completedCount}/${total})`);
+                                updateStatusBar();
+                            }
+                        };
+
+                        const result = await fetchAllMarketplaces(urls, {
+                            forceRefresh: options?.forceRefresh,
+                            onProgress,
+                            onRefreshComplete: (updated) => {
+                                this._refreshingInBackground = false;
+                                this.updateMarketplacesFromResult(updated, urls);
+                                this.services.logger.info(`Background refresh completed with ${updated.plugins.length} plugin(s).`);
+                            }
+                        });
+
+                        if (result.fromCache) {
+                            statusBar.text = `$(check) Loaded ${result.plugins.length} plugin(s) from cache`;
+                        } else {
+                            statusBar.text = `$(check) Loaded ${result.plugins.length} plugin(s)`;
+                        }
+                        setTimeout(() => statusBar.hide(), 3000);
+
+                        this._refreshingInBackground = result.refreshing ?? false;
+                        this.updateMarketplacesFromResult(result, urls);
+
+                        for (const warning of result.warnings) {
+                            this.services.logger.warn(`[marketplace] ${warning}`);
+                        }
+                        for (const error of result.errors) {
+                            this.services.logger.error(`[marketplace] ${error}`);
+                        }
+
+                        for (const marketplace of this._marketplaces) {
+                            this.services.logger.info(`Marketplace '${marketplace.url}' has ${marketplace.plugins.length} plugin(s).`);
+                        }
+
+                        const cacheNote = result.fromCache ? ' (cached)' : '';
+                        const refreshNote = result.refreshing ? ' - refreshing in background' : '';
+                        this.services.logger.info(`Tree view loaded ${result.plugins.length} plugin(s) from ${urls.length} marketplace(s)${cacheNote}${refreshNote}.`);
+                    }
+                );
+            } finally {
+                this._loading = false;
+            }
+            })
+            .catch((error) => {
+                this.services.logger.error(
+                    `Marketplace tree load failed: ${error instanceof Error ? error.message : String(error)}`
+                );
+            });
+        return this._loadDataChain;
     }
 
     async refreshMarketplace(url: string, options?: { forceRefresh?: boolean }): Promise<void> {

@@ -72,7 +72,7 @@ async function loadMarketplaceViewModel(
     };
 }
 
-export async function addMarketplaceUrl({ logger }: ExtensionServices): Promise<void> {
+export async function addMarketplaceUrl({ logger, reloadMarketplaceExplorer }: ExtensionServices): Promise<void> {
     const input = await vscode.window.showInputBox({
         prompt: 'Enter a marketplace URL or GitHub owner/repo',
         placeHolder: 'anthropics/skills or https://example.com/marketplace.json',
@@ -95,7 +95,17 @@ export async function addMarketplaceUrl({ logger }: ExtensionServices): Promise<
     const updated = [...existing, normalizedInput];
     await updateMarketplaceUrls(updated, target);
     logger.info(`Added marketplace URL: ${normalizedInput}`);
-    vscode.window.showInformationMessage('Marketplace URL added.');
+
+    try {
+        await reloadMarketplaceExplorer?.({ forceRefresh: true });
+        vscode.window.showInformationMessage('Marketplace URL added and loaded.');
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`Failed to load marketplace after add: ${message}`);
+        vscode.window.showWarningMessage(
+            `Marketplace URL was saved, but loading failed: ${message}. Use Refresh in the marketplace view to retry.`
+        );
+    }
 }
 
 export async function removeMarketplaceUrl({ logger }: ExtensionServices): Promise<void> {
@@ -178,18 +188,11 @@ export async function removeMarketplaceFromTree({ logger }: ExtensionServices, n
     vscode.window.showInformationMessage('Marketplace removed.');
 }
 
-function workspaceSummary(workspaceRoot: string, host: ReturnType<typeof getInstallHost>): string {
-    if (host === 'cursor') {
-        return `Rules/Skills/Agents/Hooks/MCP/LSP: ${workspaceRoot}\\.cursor\\<component>\\<plugin>`;
-    }
-    return `Skills: ${workspaceRoot}\\.agents\\skills\nAgents: ${workspaceRoot}\\.github\\agents\nHooks: ${workspaceRoot}\\.github\\hooks\nMCP: ${workspaceRoot}\\.github\\mcp\nLSP: ${workspaceRoot}\\.github\\lsp`;
-}
-
 function workspaceSuccessMessage(count: number, workspaceRoot: string, host: ReturnType<typeof getInstallHost>): string {
     if (host === 'cursor') {
-        return `Installed/updated ${count} plugin(s) in workspace under .cursor/ (rules, skills, agents, hooks, mcp, lsp).`;
+        return `Installed/updated ${count} plugin(s) in workspace under .cursor/ (rules, skills, agents, hooks, mcp, lsp, commands, tools, prompts, workflows).`;
     }
-    return `Installed/updated ${count} plugin(s) in workspace (.agents/skills, .github/agents, .github/hooks, .github/mcp, .github/lsp).`;
+    return `Installed/updated ${count} plugin(s) in workspace (.agents/skills, .github/agents, .github/hooks, .github/mcp, .github/lsp, .github/commands, .github/tools, .github/prompts, .github/workflows).`;
 }
 
 function userSuccessMessage(count: number, host: ReturnType<typeof getInstallHost>): string {
@@ -235,21 +238,6 @@ async function performDelegatedInstall(
     const targetPath = resolveAgentsPath(scope, workspaceFolder);
     if (!targetPath) {
         vscode.window.showErrorMessage('Workspace scope install requires an open workspace folder.');
-        return;
-    }
-
-    const targetSummary =
-        scope === 'workspace'
-            ? workspaceSummary(targetPath, host)
-            : `Root: ${resolveUserInstallRoot(host)}`;
-
-    const confirmation = await vscode.window.showWarningMessage(
-        `Install/update ${selectedPlugins.length} plugin(s) in ${scope} scope?\n${targetSummary}`,
-        { modal: true },
-        'Continue'
-    );
-
-    if (confirmation !== 'Continue') {
         return;
     }
 

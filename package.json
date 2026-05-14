@@ -1,23 +1,28 @@
 {
-  "name": "vscode-agent-plugins",
-  "displayName": "Agent Plugins Browser",
-  "description": "A browser of agent marketplaces to install plugins.",
+  "name": "agent-plugins-installer",
+  "displayName": "Agent Plugins Installer",
+  "description": "Install plugins from custom agent marketplaces. Support for repository urls and github owner/repo shorthands.",
   "version": "0.0.1",
   "preview": true,
   "author": {
     "name": "Tim Heuer",
     "url": "https://github.com/timheuer"
   },
-  "publisher": "timheuer",
+  "contributors": [
+    {
+      "name": "Shane Hird"
+    }
+  ],
+  "publisher": "smhc",
   "icon": "icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/timheuer/vscode-agent-plugins"
+    "url": "https://github.com/smhc/cursor-agent-plugins"
   },
   "bugs": {
-    "url": "https://github.com/timheuer/vscode-agent-plugins/issues"
+    "url": "https://github.com/smhc/cursor-agent-plugins/issues"
   },
-  "qna": "https://github.com/timheuer/vscode-agent-plugins/issues",
+  "qna": "https://github.com/smhc/cursor-agent-plugins/issues",
   "engines": {
     "vscode": "^1.105.0"
   },
@@ -27,9 +32,7 @@
   "extensionDependencies": [
     "vscode.github-authentication"
   ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
+  "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -137,13 +140,14 @@
           "group": "navigation"
         },
         {
-          "command": "vscode-agent-plugins.gitHubSignIn",
+          "command": "vscode-agent-plugins.browseMarketplace",
           "when": "view == vscode-agent-plugins.marketplaceExplorer",
           "group": "navigation"
         },
         {
-          "command": "vscode-agent-plugins.browseMarketplace",
-          "when": "view == vscode-agent-plugins.marketplaceExplorer"
+          "command": "vscode-agent-plugins.gitHubSignIn",
+          "when": "view == vscode-agent-plugins.marketplaceExplorer",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -185,7 +189,7 @@
         "agentPlugins.marketplaces": {
           "type": "array",
           "default": [],
-          "description": "List of marketplace.json URLs or GitHub owner/repo shorthands to browse for agent plugins.",
+          "description": "List of marketplace.json URLs, git URLs, or GitHub owner/repo shorthands to browse for agent plugins.",
           "items": {
             "type": "string",
             "pattern": "^(https?://.+|git://.+|git@.+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?)$"

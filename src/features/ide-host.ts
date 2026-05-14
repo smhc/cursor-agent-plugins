@@ -32,6 +32,10 @@ export interface WorkspaceComponentRoots {
     hooksRoot: string;
     mcpRoot: string;
     lspRoot: string;
+    commandsRoot: string;
+    toolsRoot: string;
+    promptsRoot: string;
+    workflowsRoot: string;
 }
 
 /**
@@ -39,7 +43,7 @@ export interface WorkspaceComponentRoots {
  * folder root, a sanitised plugin id, and the active host profile.
  *
  * Cursor  → workspace/.cursor/<component>/<pluginId>/
- * Legacy  → workspace/.agents/skills/  and  workspace/.github/{agents,hooks,mcp,lsp}/
+ * Legacy  → workspace/.agents/skills/  and  workspace/.github/{agents,hooks,mcp,lsp,commands,tools,prompts,workflows}/
  *           (rules have no legacy equivalent and are simply skipped on
  *           legacy hosts — the caller should check rulesRoot only on Cursor)
  */
@@ -57,6 +61,10 @@ export function resolveWorkspaceComponentRoots(
             hooksRoot:  path.join(cursorRoot, 'hooks',  pluginId),
             mcpRoot:    path.join(cursorRoot, 'mcp',    pluginId),
             lspRoot:    path.join(cursorRoot, 'lsp',    pluginId),
+            commandsRoot: path.join(cursorRoot, 'commands', pluginId),
+            toolsRoot: path.join(cursorRoot, 'tools', pluginId),
+            promptsRoot: path.join(cursorRoot, 'prompts', pluginId),
+            workflowsRoot: path.join(cursorRoot, 'workflows', pluginId),
         };
     }
 
@@ -71,6 +79,10 @@ export function resolveWorkspaceComponentRoots(
         hooksRoot:  path.join(githubRoot, 'hooks'),
         mcpRoot:    path.join(githubRoot, 'mcp'),
         lspRoot:    path.join(githubRoot, 'lsp'),
+        commandsRoot: path.join(githubRoot, 'commands'),
+        toolsRoot: path.join(githubRoot, 'tools'),
+        promptsRoot: path.join(githubRoot, 'prompts'),
+        workflowsRoot: path.join(githubRoot, 'workflows'),
     };
 }
 

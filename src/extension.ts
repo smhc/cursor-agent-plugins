@@ -21,6 +21,8 @@ export interface ExtensionServices {
 	logger: Logger;
 	context: vscode.ExtensionContext;
 	statusBarItem: vscode.StatusBarItem;
+	/** Reload marketplace explorer (fetch + hydrate tree). Set after tree provider is created. */
+	reloadMarketplaceExplorer?: (options?: { forceRefresh?: boolean }) => Promise<void>;
 }
 
 /**
@@ -113,6 +115,7 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 
 	const { treeView, provider } = createMarketplaceTreeView(services);
+	services.reloadMarketplaceExplorer = (options) => provider.loadData(options);
 	context.subscriptions.push(treeView);
 
 	// Refresh tree view when background cache refresh completes

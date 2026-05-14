@@ -41,6 +41,8 @@ export interface MarketplaceGroupItem {
 	docUrl?: string;
 	description?: string;
 	inlineContent?: unknown;
+	/** Plain-text file content read eagerly from a local git clone (survives temp dir cleanup). */
+	inlineText?: string;
 	/** Absolute path to the primary file on disk (set when content was resolved from a local git clone). */
 	localPath?: string;
 	/** Additional absolute paths to try on disk when `localPath` does not resolve. */
@@ -1207,18 +1209,52 @@ async function hydratePluginGroupsFromSource(
 }
 
 /**
+ * Read `inlineText` for every item in a plugin's groups from disk while the
+ * clone still exists.  Used when `normalizeMarketplaceDocument` already built
+ * groups (plugin.groups.length > 0) but the items only have `localPath` set.
+ */
+async function populateInlineTextForExistingGroups(
+	plugin: MarketplacePlugin
+): Promise<MarketplacePlugin> {
+	const updatedGroups = await Promise.all(
+		plugin.groups.map(async (group) => {
+			const updatedItems = await Promise.all(
+				group.items.map(async (item): Promise<MarketplaceGroupItem> => {
+					if (item.inlineText || item.inlineContent) {
+						return item;
+					}
+					const localPaths = [item.localPath, ...(item.localFallbackPaths ?? [])]
+						.filter((p): p is string => Boolean(p));
+					for (const localPath of localPaths) {
+						try {
+							const text = await fs.readFile(localPath, 'utf8');
+							return { ...item, inlineText: text };
+						} catch {
+							continue;
+						}
+					}
+					return item;
+				})
+			);
+			return { ...group, items: updatedItems };
+		})
+	);
+	return { ...plugin, groups: updatedGroups };
+}
+
+/**
  * Local-disk equivalent of `hydratePluginGroupsFromSource` used when a marketplace
  * was loaded via git clone.  Reads `plugin.json` from the cloned directory tree,
- * discovers group sub-directories by listing the filesystem, and populates
- * `localPath` / `localFallbackPaths` on each item so that `fetchGroupItemContent`
- * can read them directly from disk.
+ * discovers group sub-directories by listing the filesystem, and stores file
+ * content eagerly in `inlineText` so it survives temp dir cleanup.
  */
 async function hydratePluginGroupsFromLocalClone(
 	plugin: MarketplacePlugin,
 	cloneDir: string
 ): Promise<MarketplacePlugin> {
 	if (plugin.groups.length > 0) {
-		return plugin;
+		// Groups already built by normalizeMarketplaceDocument — just populate inlineText.
+		return populateInlineTextForExistingGroups(plugin);
 	}
 
 	const source = asString(plugin.raw.source) ?? './';
@@ -1303,7 +1339,7 @@ async function hydratePluginGroupsFromLocalClone(
 		}
 	}
 
-	getLogger()?.trace(`hydratePluginGroupsFromLocalClone for "${plugin.name}": ${hydratedGroups.map(g => `${g.name}(${g.items.length})`).join(', ')}`);
+	getLogger()?.trace(`hydratePluginGroupsFromLocalClone "${plugin.name}": ${hydratedGroups.map(g => `${g.name}(${g.items.length})`).join(', ')}`);
 
 	if (hydratedGroups.length === 0) {
 		return { ...plugin, name: hydratedName, description: hydratedDescription, version: hydratedVersion };
@@ -1374,6 +1410,7 @@ async function resolveLocalGroupItems(
  * If the path is a directory, enumerates subdirectories (leaf items) or flat
  * `.md`/`.mdc` files, mirroring the behaviour of `expandGroupDirectoryReference`.
  * If the path is a file, returns a single item.
+ * Content is read eagerly from disk and stored in `inlineText` on each item.
  */
 async function expandLocalPath(
 	localRelPath: string,
@@ -1390,13 +1427,13 @@ async function expandLocalPath(
 		stat = await fs.stat(absPath);
 	} catch {
 		// Path doesn't exist; return a single item so it still appears in the tree.
-		const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+		const item = await buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
 		return item ? [item] : [];
 	}
 
 	if (!stat.isDirectory()) {
 		// It's a file — return directly.
-		const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+		const item = await buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
 		return item ? [item] : [];
 	}
 
@@ -1405,7 +1442,7 @@ async function expandLocalPath(
 	try {
 		entries = await fs.readdir(absPath, { withFileTypes: true });
 	} catch {
-		const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+		const item = await buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
 		return item ? [item] : [];
 	}
 
@@ -1416,7 +1453,7 @@ async function expandLocalPath(
 			(e) => e.isFile() && e.name.toLowerCase() === primaryDescriptor.toLowerCase()
 		);
 		if (hasPrimary) {
-			const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+			const item = await buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
 			return item ? [item] : [];
 		}
 	}
@@ -1424,44 +1461,82 @@ async function expandLocalPath(
 	// Sub-directories → one item each (e.g. skills/demo-skill/).
 	const subdirs = entries.filter((e) => e.isDirectory());
 	if (subdirs.length > 0) {
-		return subdirs.map((e) => {
+		const results = await Promise.all(subdirs.map(async (e) => {
 			const subLocal = localRelPath ? `${localRelPath}/${e.name}` : e.name;
 			const subDisplay = displayRelPath ? `${displayRelPath}/${e.name}` : e.name;
-			return buildLocalItemFromRelPath(subLocal, subDisplay, groupKey, pluginDir) ?? {
-				name: e.name,
-				metadataFallbackUrls: []
-			};
-		}).filter(Boolean) as MarketplaceGroupItem[];
+			const item = await buildLocalItemFromRelPath(subLocal, subDisplay, groupKey, pluginDir);
+			return item ?? { name: e.name, metadataFallbackUrls: [] as string[] };
+		}));
+		return results.filter(Boolean) as MarketplaceGroupItem[];
 	}
 
 	// Flat files (.md / .mdc for rules, .md for others).
 	const filePattern = groupKey === 'rules' ? /\.(md|mdc)$/i : /\.md$/i;
 	const fileEntries = entries.filter((e) => e.isFile() && filePattern.test(e.name));
 	if (fileEntries.length > 0) {
-		return fileEntries.map((e) => {
+		const results = await Promise.all(fileEntries.map(async (e) => {
 			const fileLocal = localRelPath ? `${localRelPath}/${e.name}` : e.name;
 			const fileDisplay = displayRelPath ? `${displayRelPath}/${e.name}` : e.name;
-			const item = buildLocalItemFromRelPath(fileLocal, fileDisplay, groupKey, pluginDir);
+			const item = await buildLocalItemFromRelPath(fileLocal, fileDisplay, groupKey, pluginDir);
 			return item ? { ...item, name: e.name } : undefined;
-		}).filter((e): e is MarketplaceGroupItem => Boolean(e));
+		}));
+		return results.filter((e): e is MarketplaceGroupItem => Boolean(e));
 	}
 
 	// Nothing useful found — fall back to a single item for the directory itself.
-	const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+	const item = await buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
 	return item ? [item] : [];
 }
 
 /**
- * Build a single `MarketplaceGroupItem` for a path relative to `pluginDir`.
- * If `localRelPath` points directly to a file (has an extension), `localPath` is the
- * file itself.  Otherwise descriptor file candidates are resolved under the directory.
+ * Read the primary descriptor file for a group item from disk while the clone still exists.
+ * Returns the first readable file content, or `undefined` if nothing was found.
+ *
+ * `localRelPath` is relative to `pluginDir`.  If it already has an extension it is
+ * treated as a direct file path; otherwise the descriptor defaults for `groupKey`
+ * are tried as children of that directory.
  */
-function buildLocalItemFromRelPath(
+async function readLocalDescriptorContent(
+	localRelPath: string,
+	pluginDir: string,
+	groupKey: string
+): Promise<string | undefined> {
+	const cleanedLocal = normalizeRelativePath(localRelPath);
+	if (!cleanedLocal) {
+		return undefined;
+	}
+
+	const pathSegments = cleanedLocal.split('/').filter(Boolean);
+	const displayName = pathSegments.length > 0 ? pathSegments[pathSegments.length - 1] : cleanedLocal;
+
+	const candidates: string[] = looksLikeFilePath(cleanedLocal)
+		? [path.join(pluginDir, ...cleanedLocal.split('/'))]
+		: descriptorDefaultsForGroup(groupKey, displayName).map((fileName) =>
+			path.join(pluginDir, ...cleanedLocal.split('/'), fileName)
+		);
+
+	for (const candidate of candidates) {
+		try {
+			return await fs.readFile(candidate, 'utf8');
+		} catch {
+			continue;
+		}
+	}
+
+	return undefined;
+}
+
+/**
+ * Build a single `MarketplaceGroupItem` for a path relative to `pluginDir`.
+ * Reads descriptor content eagerly from disk and stores it in `inlineText` so
+ * it remains accessible after the temp clone directory is deleted.
+ */
+async function buildLocalItemFromRelPath(
 	localRelPath: string,
 	displayRelPath: string,
 	groupKey: string,
 	pluginDir: string
-): MarketplaceGroupItem | undefined {
+): Promise<MarketplaceGroupItem | undefined> {
 	const cleanedLocal = normalizeRelativePath(localRelPath);
 	if (!cleanedLocal) {
 		return undefined;
@@ -1471,28 +1546,13 @@ function buildLocalItemFromRelPath(
 	const pathSegments = displayCleaned.split('/').filter(Boolean);
 	const displayName = pathSegments.length > 0 ? pathSegments[pathSegments.length - 1] : displayCleaned;
 
-	// If the path already points to a file (has a file extension), use it directly.
-	if (looksLikeFilePath(cleanedLocal)) {
-		return {
-			name: displayName,
-			path: displayCleaned,
-			metadataFallbackUrls: [],
-			localPath: path.join(pluginDir, ...cleanedLocal.split('/'))
-		};
-	}
-
-	// Otherwise treat it as a directory and look for descriptor files inside.
-	const descriptorFiles = descriptorDefaultsForGroup(groupKey, displayName);
-	const localCandidates = descriptorFiles.map((fileName) =>
-		path.join(pluginDir, ...cleanedLocal.split('/'), fileName)
-	);
+	const inlineText = await readLocalDescriptorContent(localRelPath, pluginDir, groupKey);
 
 	return {
 		name: displayName,
 		path: displayCleaned,
 		metadataFallbackUrls: [],
-		localPath: localCandidates[0],
-		localFallbackPaths: localCandidates.slice(1)
+		inlineText
 	};
 }
 
@@ -1971,7 +2031,15 @@ function extractDescriptorSummary(markdown: string): string | undefined {
 }
 
 export async function fetchGroupItemDescription(item: MarketplaceGroupItem): Promise<string | undefined> {
-	// Try local disk paths first (git-clone based repos).
+	// Eagerly-read content from a local git clone (survives temp dir cleanup).
+	if (item.inlineText) {
+		const summary = extractDescriptorSummary(item.inlineText);
+		if (summary) {
+			return summary;
+		}
+	}
+
+	// Try local disk paths (valid only while the temp dir still exists).
 	const localPaths = [item.localPath, ...(item.localFallbackPaths ?? [])].filter((entry): entry is string => Boolean(entry));
 	for (const localPath of localPaths) {
 		try {
@@ -2013,7 +2081,12 @@ export async function fetchGroupItemContent(item: MarketplaceGroupItem): Promise
 		};
 	}
 
-	// Try local disk paths first (git-clone based repos).
+	// Eagerly-read content from a local git clone (survives temp dir cleanup).
+	if (item.inlineText) {
+		return { content: item.inlineText };
+	}
+
+	// Try local disk paths (valid only while the temp dir still exists).
 	const localPaths = [item.localPath, ...(item.localFallbackPaths ?? [])].filter((entry): entry is string => Boolean(entry));
 	for (const localPath of localPaths) {
 		try {
