@@ -53,6 +53,10 @@ export interface MarketplaceFetchResult {
 	plugins: MarketplacePlugin[];
 	warnings: string[];
 	errors: string[];
+	/** Root-level `name` or `title` from a marketplace object document (single `fetchMarketplace` result). */
+	marketplaceDisplayName?: string;
+	/** When multiple URLs are fetched together, maps each configured URL to its document display name. */
+	marketplaceDisplayNames?: Record<string, string>;
 }
 
 interface RepoContext {
@@ -1577,6 +1581,20 @@ function getPluginList(document: unknown): unknown[] {
 	return [];
 }
 
+/** Root-level display name from a marketplace.json object (not used for JSON arrays). */
+function getMarketplaceDocumentDisplayName(document: unknown): string | undefined {
+	if (Array.isArray(document)) {
+		return undefined;
+	}
+
+	const record = asRecord(document);
+	if (!record) {
+		return undefined;
+	}
+
+	return asString(record.name) ?? asString(record.title);
+}
+
 function normalizePlugin(
 	entry: unknown,
 	sourceUrl: string,
@@ -1657,7 +1675,8 @@ export function normalizeMarketplaceDocument(
 	return {
 		plugins,
 		warnings,
-		errors: []
+		errors: [],
+		marketplaceDisplayName: getMarketplaceDocumentDisplayName(document)
 	};
 }
 
@@ -1862,14 +1881,26 @@ async function fetchAllMarketplacesCore(
 		}
 	}));
 
-	for (const result of results) {
+	const marketplaceDisplayNames: Record<string, string> = {};
+
+	for (let i = 0; i < results.length; i++) {
+		const result = results[i];
+		const url = urls[i];
 		if (result.status === 'fulfilled') {
 			aggregate.plugins.push(...result.value.plugins);
 			aggregate.warnings.push(...result.value.warnings);
 			aggregate.errors.push(...result.value.errors);
+			const label = result.value.marketplaceDisplayName;
+			if (label && url) {
+				marketplaceDisplayNames[url] = label;
+			}
 		} else {
 			aggregate.errors.push(`Marketplace fetch failed: ${result.reason}`);
 		}
+	}
+
+	if (Object.keys(marketplaceDisplayNames).length > 0) {
+		aggregate.marketplaceDisplayNames = marketplaceDisplayNames;
 	}
 
 	const deduped = new Map<string, MarketplacePlugin>();

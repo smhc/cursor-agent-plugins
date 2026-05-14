@@ -19,6 +19,9 @@ const DEFAULT_CONFIG: CacheConfig = {
     staleTTL: 60 * 60 * 1000      // 1 hour - data is stale but still usable
 };
 
+// Safe margin below VS Code's ~1 MB globalState per-key limit
+const STORAGE_SIZE_LIMIT = 800_000;
+
 /**
  * In-memory cache with TTL support and stale-while-revalidate pattern.
  * Uses VS Code's global state for persistence across sessions.
@@ -183,6 +186,39 @@ export class MarketplaceCache {
         return data;
     }
 
+    /**
+     * Strip large runtime-only fields from marketplace fetch results before persisting.
+     * `inlineText` and `inlineContent` hold full file contents; `localPath`/`localFallbackPaths`
+     * point to temp dirs that are gone after restart. All are re-derived on demand when needed.
+     */
+    private prepareForStorage(entry: CacheEntry<unknown>): CacheEntry<unknown> {
+        const data = entry.data as { plugins?: unknown[] } | null;
+        if (!data || !Array.isArray(data.plugins)) {
+            return entry;
+        }
+
+        type AnyItem = Record<string, unknown>;
+        type AnyGroup = { items?: AnyItem[] } & Record<string, unknown>;
+        type AnyPlugin = { groups?: AnyGroup[] } & Record<string, unknown>;
+
+        const stripped = {
+            ...data,
+            plugins: (data.plugins as AnyPlugin[]).map((plugin) => ({
+                ...plugin,
+                groups: plugin.groups?.map((group) => ({
+                    ...group,
+                    items: group.items?.map((item) => {
+                        const { inlineText, inlineContent, localPath, localFallbackPaths, ...rest } = item;
+                        void inlineText; void inlineContent; void localPath; void localFallbackPaths;
+                        return rest;
+                    })
+                }))
+            }))
+        };
+
+        return { ...entry, data: stripped };
+    }
+
     private loadFromStorage(): void {
         try {
             const stored = this.globalState.get<Record<string, CacheEntry<unknown>>>('marketplaceCache');
@@ -205,10 +241,17 @@ export class MarketplaceCache {
         try {
             const data: Record<string, CacheEntry<unknown>> = {};
             for (const [key, entry] of this.memoryCache.entries()) {
-                data[key] = entry;
+                data[key] = this.prepareForStorage(entry);
             }
-            // Fire and forget - don't await to avoid blocking
-            void this.globalState.update('marketplaceCache', data);
+            const json = JSON.stringify(data);
+            getLogger()?.trace(`Persisting cache to storage (${json.length} bytes, ${this.memoryCache.size} entries)`);
+            if (json.length > STORAGE_SIZE_LIMIT) {
+                getLogger()?.warn(`Cache too large to persist (${json.length} bytes > ${STORAGE_SIZE_LIMIT}), skipping`);
+                return;
+            }
+            this.globalState.update('marketplaceCache', data).then(undefined, (error) => {
+                getLogger()?.warn(`Failed to persist cache to storage: ${error}`);
+            });
         } catch (error) {
             getLogger()?.warn(`Failed to persist cache to storage: ${error}`);
         }

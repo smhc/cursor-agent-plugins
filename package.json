@@ -32,7 +32,9 @@
   "extensionDependencies": [
     "vscode.github-authentication"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onView:vscode-agent-plugins.marketplaceExplorer"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -57,7 +59,8 @@
     "commands": [
       {
         "command": "vscode-agent-plugins.browseMarketplace",
-        "title": "Agent Plugins: Browse Marketplace"
+        "title": "Agent Plugins: Browse Marketplace",
+        "icon": "$(extensions)"
       },
       {
         "command": "vscode-agent-plugins.addMarketplaceUrl",
@@ -225,13 +228,15 @@
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "package:vsix": "vsce package -o extension.vsix",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test",
-    "deploy": "vsce publish"
+    "deploy": "vsce publish",
+    "deploy:openvsx": "npm run package:vsix && ovsx publish extension.vsix"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -241,9 +246,11 @@
     "@typescript-eslint/parser": "^8.31.1",
     "@vscode/test-cli": "^0.0.11",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.9.1",
     "esbuild": "^0.25.3",
     "eslint": "^9.25.1",
     "npm-run-all": "^4.1.5",
+    "ovsx": "^0.10.12",
     "typescript": "^5.8.3"
   },
   "dependencies": {

@@ -118,6 +118,10 @@ export function activate(context: vscode.ExtensionContext) {
 	services.reloadMarketplaceExplorer = (options) => provider.loadData(options);
 	context.subscriptions.push(treeView);
 
+	// Eager load so the tree is not stuck empty until the first getChildren-driven load completes
+	// (some hosts defer implicit view activation; explicit onView in package.json also covers that).
+	void provider.loadData();
+
 	// Refresh tree view when background cache refresh completes
 	context.subscriptions.push(
 		onMarketplaceCacheUpdated(() => {

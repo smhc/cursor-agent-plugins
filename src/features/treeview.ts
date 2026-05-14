@@ -16,6 +16,8 @@ export { MarketplacePlugin };
 export interface MarketplaceNode {
     type: 'marketplace';
     url: string;
+    /** Root `name` / `title` from marketplace.json when present; otherwise derived from URL in the label. */
+    displayName?: string;
     plugins: MarketplacePlugin[];
 }
 
@@ -209,7 +211,7 @@ export class MarketplaceTreeDataProvider implements vscode.TreeDataProvider<Tree
                     statusBar.show();
 
                     const result = await fetchCachedMarketplace(url, { forceRefresh: options?.forceRefresh });
-                    this.updateSingleMarketplaceFromResult(url, result.plugins);
+                    this.updateSingleMarketplaceFromResult(url, result.plugins, result.marketplaceDisplayName);
                     clearMarketplaceListCache(urls);
 
                     if (result.fromCache) {
@@ -236,7 +238,10 @@ export class MarketplaceTreeDataProvider implements vscode.TreeDataProvider<Tree
         }
     }
 
-    private updateMarketplacesFromResult(result: { plugins: MarketplacePlugin[] }, urls: string[]): void {
+    private updateMarketplacesFromResult(
+        result: { plugins: MarketplacePlugin[]; marketplaceDisplayNames?: Record<string, string> },
+        urls: string[]
+    ): void {
         const marketplaceMap = new Map<string, MarketplacePlugin[]>();
         for (const plugin of result.plugins) {
             const existing = marketplaceMap.get(plugin.sourceUrl) ?? [];
@@ -247,16 +252,22 @@ export class MarketplaceTreeDataProvider implements vscode.TreeDataProvider<Tree
         this._marketplaces = urls.map((url) => ({
             type: 'marketplace' as const,
             url,
+            displayName: result.marketplaceDisplayNames?.[url],
             plugins: marketplaceMap.get(url) ?? []
         }));
 
         this._onDidChangeTreeData.fire();
     }
 
-    private updateSingleMarketplaceFromResult(url: string, plugins: MarketplacePlugin[]): void {
+    private updateSingleMarketplaceFromResult(
+        url: string,
+        plugins: MarketplacePlugin[],
+        marketplaceDisplayName?: string
+    ): void {
         const nextNode: MarketplaceNode = {
             type: 'marketplace',
             url,
+            displayName: marketplaceDisplayName,
             plugins: plugins.filter((plugin) => plugin.sourceUrl === url)
         };
 
@@ -332,13 +343,18 @@ export class MarketplaceTreeDataProvider implements vscode.TreeDataProvider<Tree
     }
 
     private createMarketplaceItem(node: MarketplaceNode): vscode.TreeItem {
-        const label = this.formatMarketplaceLabel(node.url);
+        const label = node.displayName?.trim() || this.formatMarketplaceLabel(node.url);
         const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Expanded);
         item.iconPath = new vscode.ThemeIcon('cloud');
         item.description = `${node.plugins.length} plugin(s)`;
         // Use different contextValue for GitHub vs non-GitHub marketplaces
         item.contextValue = this.isGitHubUrl(node.url) ? 'marketplace-github' : 'marketplace';
-        item.tooltip = node.url;
+        const tip = new vscode.MarkdownString();
+        if (node.displayName?.trim()) {
+            tip.appendMarkdown(`**${node.displayName.trim()}**\n\n`);
+        }
+        tip.appendMarkdown(node.url);
+        item.tooltip = tip;
         return item;
     }
 

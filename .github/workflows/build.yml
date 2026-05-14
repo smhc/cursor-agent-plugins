@@ -27,9 +27,6 @@ jobs:
       - name: 📦 Install dependencies
         run: npm install
 
-      - name: 🎁 Install vsce
-        run: npm install -g @vscode/vsce
-
       - name: 🖥️ Install cross-env
         run: npm install -g cross-env
 
@@ -45,13 +42,19 @@ jobs:
 
       - name: 📦 Package
         run: |
-          vsce package -o ./${{ github.event.repository.name}}.vsix
+          npx vsce package -o ./${{ github.event.repository.name}}.vsix
 
       - name: 📰 Publish
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: npm run deploy
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: 📦 Publish to Open VSX
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: npx ovsx publish "./${{ github.event.repository.name}}.vsix"
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
 
       - name: 🔗 Marketplace Link
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -62,6 +65,7 @@ jobs:
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **Version** | ${{ steps.nbgv.outputs.SimpleVersion }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Marketplace** | [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=timheuer.vscode-agent-plugins) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Open VSX** | [Open VSX Registry](https://open-vsx.org/extension/smhc/agent-plugins-installer) |" >> $GITHUB_STEP_SUMMARY
 
       - name: ⬆️ Upload artifact
         uses: actions/upload-artifact@v4

@@ -387,6 +387,7 @@ suite('Extension Test Suite', () => {
 	test('normalizes rules group from plugin manifest', () => {
 		const result = normalizeMarketplaceDocument(
 			{
+				name: 'Demo Marketplace',
 				plugins: [
 					{
 						id: 'rules-plugin',
@@ -400,9 +401,27 @@ suite('Extension Test Suite', () => {
 		);
 
 		assert.strictEqual(result.errors.length, 0);
+		assert.strictEqual(result.marketplaceDisplayName, 'Demo Marketplace');
 		const groups = result.plugins[0].groups.map((g) => g.key).sort();
 		assert.ok(groups.includes('rules'), 'expected a rules group');
 		assert.ok(groups.includes('skills'), 'expected a skills group');
+	});
+
+	test('marketplace display name prefers root name over title', () => {
+		const named = normalizeMarketplaceDocument(
+			{ name: 'Primary', title: 'Secondary', plugins: [] },
+			'https://example.com/m.json'
+		);
+		assert.strictEqual(named.marketplaceDisplayName, 'Primary');
+
+		const titled = normalizeMarketplaceDocument(
+			{ title: 'Title Only', plugins: [] },
+			'https://example.com/m2.json'
+		);
+		assert.strictEqual(titled.marketplaceDisplayName, 'Title Only');
+
+		const arrayDoc = normalizeMarketplaceDocument([], 'https://example.com/m3.json');
+		assert.strictEqual(arrayDoc.marketplaceDisplayName, undefined);
 	});
 
 	test('hydrates rules group from .cursor-plugin/plugin.json', async () => {
