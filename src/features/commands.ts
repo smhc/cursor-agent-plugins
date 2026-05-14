@@ -774,7 +774,7 @@ export async function previewItem(services: ExtensionServices, node: ItemNode): 
         }
     );
 
-    panel.iconPath = new vscode.ThemeIcon('file');
+    panel.iconPath = vscode.Uri.joinPath(services.context.extensionUri, 'icon.png');
     panel.webview.html = createPreviewWebviewHtml(
         panel,
         services.context.extensionUri,

@@ -2,7 +2,7 @@
   "name": "vscode-agent-plugins",
   "displayName": "Agent Plugins Browser",
   "description": "A browser of agent marketplaces to install plugins.",
-  "version": "0.0.0-placeholder",
+  "version": "0.0.1",
   "preview": true,
   "author": {
     "name": "Tim Heuer",
@@ -19,7 +19,7 @@
   },
   "qna": "https://github.com/timheuer/vscode-agent-plugins/issues",
   "engines": {
-    "vscode": "^1.109.0"
+    "vscode": "^1.105.0"
   },
   "categories": [
     "Other"
@@ -28,6 +28,7 @@
     "vscode.github-authentication"
   ],
   "activationEvents": [
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -183,7 +184,7 @@
       "properties": {
         "agentPlugins.marketplaces": {
           "type": "array",
-          "default": [ ],
+          "default": [],
           "description": "List of marketplace.json URLs or GitHub owner/repo shorthands to browse for agent plugins.",
           "items": {
             "type": "string",
@@ -231,7 +232,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "20.x",
-    "@types/vscode": "^1.109.0",
+    "@types/vscode": "^1.105.0",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
     "@typescript-eslint/parser": "^8.31.1",
     "@vscode/test-cli": "^0.0.11",
