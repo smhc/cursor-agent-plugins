@@ -34,10 +34,15 @@ export function validateMarketplaceUrlInput(value: string): string | undefined {
         return 'Enter a valid URL or GitHub owner/repo.';
     }
 
+    // Allow git@ SSH URLs (e.g. git@github.com:org/repo.git)
+    if (normalized.startsWith('git@')) {
+        return undefined;
+    }
+
     try {
         const parsed = new URL(normalized);
-        if (!/^https?:$/i.test(parsed.protocol)) {
-            return 'Only http/https URLs are supported.';
+        if (!/^(https?|git):$/i.test(parsed.protocol)) {
+            return 'Only http/https/git URLs, SSH git URLs, and GitHub owner/repo shorthands are supported.';
         }
         return undefined;
     } catch {

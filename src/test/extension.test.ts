@@ -11,6 +11,7 @@ import {
 	normalizeMarketplaceDocument,
 	resolveMarketplaceDocumentReference
 } from '../features/marketplace';
+import { getInstallHost, resolveWorkspaceComponentRoots, resolveUserInstallRoot } from '../features/ide-host';
 
 suite('Extension Test Suite', () => {
 	const originalFetch = globalThis.fetch;
@@ -381,5 +382,110 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(response.status, 403);
 		assert.strictEqual(errors.length, 1);
 		assert.match(errors[0], /rate-limited/i);
+	});
+
+	test('normalizes rules group from plugin manifest', () => {
+		const result = normalizeMarketplaceDocument(
+			{
+				plugins: [
+					{
+						id: 'rules-plugin',
+						name: 'Rules Plugin',
+						rules: './rules/',
+						skills: './skills/'
+					}
+				]
+			},
+			'https://example.com/marketplace.json'
+		);
+
+		assert.strictEqual(result.errors.length, 0);
+		const groups = result.plugins[0].groups.map((g) => g.key).sort();
+		assert.ok(groups.includes('rules'), 'expected a rules group');
+		assert.ok(groups.includes('skills'), 'expected a skills group');
+	});
+
+	test('hydrates rules group from .cursor-plugin/plugin.json', async () => {
+		(vscode.authentication as typeof vscode.authentication & { getSession: typeof vscode.authentication.getSession }).getSession = (async () => undefined) as unknown as typeof vscode.authentication.getSession;
+
+		globalThis.fetch = (async (input: string | URL | Request) => {
+			const url = typeof input === 'string'
+				? input
+				: input instanceof URL
+					? input.toString()
+					: (input as Request).url;
+
+			if (url === 'https://raw.githubusercontent.com/example/cursor-plugin-repo/main/.cursor-plugin/marketplace.json') {
+				return new Response(JSON.stringify({
+					plugins: [{ name: 'my-cursor-plugin', source: './' }]
+				}), { status: 200 });
+			}
+
+			if (url === 'https://raw.githubusercontent.com/example/cursor-plugin-repo/main/.cursor-plugin/plugin.json') {
+				return new Response(JSON.stringify({
+					name: 'my-cursor-plugin',
+					rules: './rules/',
+					skills: './skills/'
+				}), { status: 200 });
+			}
+
+			if (url.includes('/api.github.com/repos/example/cursor-plugin-repo/contents/rules') ||
+				url === 'https://api.github.com/repos/example/cursor-plugin-repo/contents/rules?ref=main') {
+				return new Response(JSON.stringify([
+					{ type: 'file', name: 'my-rule.mdc', path: 'rules/my-rule.mdc' },
+					{ type: 'file', name: 'another-rule.md', path: 'rules/another-rule.md' }
+				]), { status: 200 });
+			}
+
+			if (url.includes('/api.github.com/repos/example/cursor-plugin-repo/contents/skills') ||
+				url === 'https://api.github.com/repos/example/cursor-plugin-repo/contents/skills?ref=main') {
+				return new Response(JSON.stringify([
+					{ type: 'dir', name: 'demo-skill', path: 'skills/demo-skill' }
+				]), { status: 200 });
+			}
+
+			return new Response('not found', { status: 404 });
+		}) as typeof globalThis.fetch;
+
+		const result = await fetchMarketplace('https://raw.githubusercontent.com/example/cursor-plugin-repo/main/.cursor-plugin/marketplace.json');
+
+		assert.strictEqual(result.errors.length, 0);
+		assert.strictEqual(result.plugins.length, 1);
+
+		const rulesGroup = result.plugins[0].groups.find((g) => g.key === 'rules');
+		assert.ok(rulesGroup, 'expected a rules group after hydration');
+		const ruleNames = rulesGroup?.items.map((i) => i.name) ?? [];
+		assert.ok(ruleNames.includes('my-rule.mdc'), 'expected .mdc rule file item');
+		assert.ok(ruleNames.includes('another-rule.md'), 'expected .md rule file item');
+	});
+
+	test('resolveWorkspaceComponentRoots returns .cursor paths for Cursor host', () => {
+		const roots = resolveWorkspaceComponentRoots('/workspace/my-repo', 'my-plugin', 'cursor');
+		assert.ok(roots.skillsRoot.includes('.cursor'), 'skillsRoot should be under .cursor');
+		assert.ok(roots.skillsRoot.includes('my-plugin'), 'skillsRoot should include plugin id');
+		assert.ok(roots.rulesRoot.includes('.cursor'), 'rulesRoot should be under .cursor');
+		assert.ok(roots.agentsRoot.includes('.cursor'), 'agentsRoot should be under .cursor');
+		assert.ok(roots.hooksRoot.includes('.cursor'), 'hooksRoot should be under .cursor');
+		assert.ok(roots.mcpRoot.includes('.cursor'), 'mcpRoot should be under .cursor');
+		assert.ok(roots.lspRoot.includes('.cursor'), 'lspRoot should be under .cursor');
+	});
+
+	test('resolveWorkspaceComponentRoots returns legacy paths for vscode host', () => {
+		const roots = resolveWorkspaceComponentRoots('/workspace/my-repo', 'my-plugin', 'vscode');
+		assert.ok(roots.skillsRoot.includes('.agents'), 'skillsRoot should be under .agents on legacy host');
+		assert.ok(roots.agentsRoot.includes('.github'), 'agentsRoot should be under .github on legacy host');
+		assert.ok(roots.hooksRoot.includes('.github'), 'hooksRoot should be under .github on legacy host');
+		assert.strictEqual(roots.rulesRoot, '', 'rulesRoot should be empty on legacy host');
+	});
+
+	test('resolveUserInstallRoot returns ~/.cursor/plugins/local for Cursor', () => {
+		const root = resolveUserInstallRoot('cursor');
+		assert.ok(root.includes('.cursor'), 'user root should be under .cursor for Cursor');
+		assert.ok(root.includes('plugins'), 'user root should include plugins directory');
+	});
+
+	test('resolveUserInstallRoot returns ~/.copilot/installed-plugins for legacy', () => {
+		const root = resolveUserInstallRoot('vscode');
+		assert.ok(root.includes('.copilot'), 'user root should be under .copilot for legacy host');
 	});
 });

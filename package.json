@@ -188,7 +188,7 @@
           "description": "List of marketplace.json URLs or GitHub owner/repo shorthands to browse for agent plugins.",
           "items": {
             "type": "string",
-            "pattern": "^(https?://.+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?)$"
+            "pattern": "^(https?://.+|git://.+|git@.+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?)$"
           }
         },
         "agentPlugins.logLevel": {

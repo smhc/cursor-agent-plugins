@@ -5,6 +5,8 @@ import * as vscode from 'vscode';
 import { MarketplaceGroupItem, MarketplacePlugin } from './marketplace';
 import { fetchWithGitHubAuth } from './github-auth';
 import { getLogger } from './logger';
+import { gitCloneShallowToTemp } from './git-clone';
+import { getInstallHost, resolveWorkspaceComponentRoots, resolveUserInstallRoot } from './ide-host';
 
 export type InstallScope = 'workspace' | 'user';
 
@@ -223,6 +225,57 @@ async function copyGithubEntryTree(repoContext: RepoContext, sourcePath: string,
     return false;
 }
 
+async function gitCloneToTemp(gitUrl: string): Promise<string> {
+    return gitCloneShallowToTemp(gitUrl, 'agent-plugins-git');
+}
+
+async function copyLocalTree(src: string, dest: string): Promise<void> {
+    await fs.mkdir(dest, { recursive: true });
+    await fs.cp(src, dest, { recursive: true });
+}
+
+async function installPluginFromGit(
+    plugin: MarketplacePlugin,
+    skillsRoot: string,
+    rulesRoot: string,
+    agentsRoot: string,
+    hooksRoot: string,
+    mcpRoot: string,
+    lspRoot: string
+): Promise<void> {
+    const gitUrl = plugin.gitUrl!;
+    const tmpDir = await gitCloneToTemp(gitUrl);
+    try {
+        for (const group of plugin.groups) {
+            const groupItems = group.items.filter((item) => item.path);
+
+            const copyGroup = async (root: string) => {
+                if (groupItems.length > 0) {
+                    for (const item of groupItems) {
+                        const src = path.join(tmpDir, normalizeRelativePath(item.path!));
+                        await copyLocalTree(src, path.join(root, sanitizePathSegment(item.name)));
+                    }
+                } else {
+                    await copyLocalTree(tmpDir, path.join(root, sanitizePathSegment(plugin.name || plugin.id)));
+                }
+            };
+
+            if (group.key === 'skills') { await copyGroup(skillsRoot); }
+            if (group.key === 'rules' && rulesRoot) { await copyGroup(rulesRoot); }
+            if (group.key === 'agents') { await copyGroup(agentsRoot); }
+            if (group.key === 'hooks') { await copyGroup(hooksRoot); }
+            if (group.key === 'mcp') { await copyGroup(mcpRoot); }
+            if (group.key === 'lsp') { await copyGroup(lspRoot); }
+        }
+
+        if (plugin.groups.length === 0) {
+            await copyLocalTree(tmpDir, path.join(skillsRoot, sanitizePathSegment(plugin.name || plugin.id)));
+        }
+    } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+}
+
 async function fallbackDownloadItemDescriptor(item: MarketplaceGroupItem, targetPath: string): Promise<boolean> {
     const candidates = [item.metadataUrl, ...item.metadataFallbackUrls].filter((entry): entry is string => Boolean(entry));
     for (const candidate of candidates) {
@@ -237,8 +290,16 @@ async function fallbackDownloadItemDescriptor(item: MarketplaceGroupItem, target
 
 async function installSkillItem(plugin: MarketplacePlugin, item: MarketplaceGroupItem, skillsRoot: string): Promise<void> {
     const skillFolder = path.join(skillsRoot, sanitizePathSegment(item.name));
-    await fs.mkdir(skillFolder, { recursive: true });
 
+    // Local disk install: item.localPath points to the primary descriptor file inside the skill
+    // directory. Copy the whole parent directory (the skill folder itself) to the target.
+    if (item.localPath) {
+        const srcDir = path.dirname(item.localPath);
+        await copyLocalTree(srcDir, skillFolder);
+        return;
+    }
+
+    await fs.mkdir(skillFolder, { recursive: true });
     const repoContext = getRepoContext(plugin);
     const sourcePath = item.path ? normalizeRelativePath(item.path) : undefined;
     if (repoContext && sourcePath) {
@@ -249,6 +310,39 @@ async function installSkillItem(plugin: MarketplacePlugin, item: MarketplaceGrou
     }
 
     await fallbackDownloadItemDescriptor(item, skillFolder);
+}
+
+async function installRuleItem(plugin: MarketplacePlugin, item: MarketplaceGroupItem, rulesRoot: string): Promise<void> {
+    await fs.mkdir(rulesRoot, { recursive: true });
+
+    // Local disk install: item.localPath is the actual rule file (.mdc or .md).
+    // Copy it directly into rulesRoot preserving its filename.
+    if (item.localPath) {
+        const destFile = path.join(rulesRoot, path.basename(item.localPath));
+        await fs.copyFile(item.localPath, destFile);
+        return;
+    }
+
+    const repoContext = getRepoContext(plugin);
+    const sourcePath = item.path ? normalizeRelativePath(item.path) : undefined;
+    if (repoContext && sourcePath) {
+        if (looksLikeFilePath(sourcePath)) {
+            const rawUrl = `${repoContext.rawBaseUrl}/${sourcePath}`;
+            const fileName = path.basename(sourcePath);
+            const copied = await downloadRawFile(rawUrl, path.join(rulesRoot, fileName));
+            if (copied) {
+                return;
+            }
+        }
+        const ruleFolder = path.join(rulesRoot, sanitizePathSegment(item.name));
+        await fs.mkdir(ruleFolder, { recursive: true });
+        const copied = await copyGithubEntryTree(repoContext, sourcePath, ruleFolder);
+        if (copied) {
+            return;
+        }
+    }
+
+    await fallbackDownloadItemDescriptor(item, rulesRoot);
 }
 
 async function getAgentText(plugin: MarketplacePlugin, item: MarketplaceGroupItem): Promise<string | undefined> {
@@ -307,6 +401,14 @@ async function getAgentText(plugin: MarketplacePlugin, item: MarketplaceGroupIte
 
 async function installAgentItem(plugin: MarketplacePlugin, item: MarketplaceGroupItem, agentsRoot: string): Promise<void> {
     await fs.mkdir(agentsRoot, { recursive: true });
+
+    // Local disk install: copy the file directly preserving its name.
+    if (item.localPath) {
+        const destFile = path.join(agentsRoot, path.basename(item.localPath));
+        await fs.copyFile(item.localPath, destFile);
+        return;
+    }
+
     const fileBase = sanitizePathSegment(item.name.replace(/\.agent\.md$/i, '').replace(/\.md$/i, ''));
     const filePath = path.join(agentsRoot, `${fileBase}.agent.md`);
 
@@ -329,6 +431,13 @@ async function installConfigItem(
     groupKey: 'hooks' | 'mcp' | 'lsp'
 ): Promise<void> {
     await fs.mkdir(groupRoot, { recursive: true });
+
+    // Local disk install: copy the file directly.
+    if (item.localPath) {
+        const destFile = path.join(groupRoot, path.basename(item.localPath));
+        await fs.copyFile(item.localPath, destFile);
+        return;
+    }
 
     if (typeof item.inlineContent !== 'undefined') {
         const fileName = groupKey === 'hooks'
@@ -363,19 +472,29 @@ async function installConfigItem(
 }
 
 async function materializeLocalInstallStructure(workspaceRoot: string, plugins: MarketplacePlugin[]): Promise<void> {
-    const skillsRoot = path.join(workspaceRoot, '.agents', 'skills');
-    const agentsRoot = path.join(workspaceRoot, '.github', 'agents');
-    const hooksRoot = path.join(workspaceRoot, '.github', 'hooks');
-    const mcpRoot = path.join(workspaceRoot, '.github', 'mcp');
-    const lspRoot = path.join(workspaceRoot, '.github', 'lsp');
-
+    const host = getInstallHost();
     const installPromises: Promise<void>[] = [];
 
     for (const plugin of plugins) {
+        const pluginId = getPluginName(plugin);
+        const roots = resolveWorkspaceComponentRoots(workspaceRoot, pluginId, host);
+        const { skillsRoot, rulesRoot, agentsRoot, hooksRoot, mcpRoot, lspRoot } = roots;
+
+        if (plugin.gitUrl) {
+            installPromises.push(installPluginFromGit(plugin, skillsRoot, rulesRoot, agentsRoot, hooksRoot, mcpRoot, lspRoot));
+            continue;
+        }
+
         for (const group of plugin.groups) {
             if (group.key === 'skills') {
                 for (const item of group.items) {
                     installPromises.push(installSkillItem(plugin, item, skillsRoot));
+                }
+            }
+
+            if (group.key === 'rules' && rulesRoot) {
+                for (const item of group.items) {
+                    installPromises.push(installRuleItem(plugin, item, rulesRoot));
                 }
             }
 
@@ -408,7 +527,64 @@ async function materializeLocalInstallStructure(workspaceRoot: string, plugins: 
     await Promise.all(installPromises);
 }
 
+/**
+ * Cursor user-scope install: shallow clone the plugin's git repo and copy the
+ * plugin source subtree (from plugin.raw.source, e.g. "plugins/encompass-demo/")
+ * into `localPluginsRoot/<pluginId>/`, replacing any prior install.
+ *
+ * This is the Cursor "plugin" installation method — the whole package directory
+ * lands under ~/.cursor/plugins/local/ so Cursor can discover rules, skills,
+ * agents, hooks, and MCP config from one consistent place.
+ *
+ * Non-gitUrl plugins cannot use this method; they fall back to the legacy
+ * decomposed install (see materializeUserInstallStructureLegacy).
+ */
+async function installCursorLocalPlugin(plugin: MarketplacePlugin, localPluginsRoot: string): Promise<void> {
+    const pluginId = getPluginName(plugin);
+    const destRoot = path.join(localPluginsRoot, pluginId);
+
+    const gitUrl = plugin.gitUrl!;
+    const tmpDir = await gitCloneToTemp(gitUrl);
+    try {
+        const source = typeof plugin.raw.source === 'string' ? plugin.raw.source : undefined;
+        const sourceSubdir = source ? normalizeRelativePath(source).replace(/\/+$/, '') : '';
+        const srcPath = sourceSubdir ? path.join(tmpDir, sourceSubdir) : tmpDir;
+
+        await fs.rm(destRoot, { recursive: true, force: true });
+        await copyLocalTree(srcPath, destRoot);
+    } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+}
+
 async function materializeUserInstallStructure(userRoot: string, plugins: MarketplacePlugin[]): Promise<InstalledPathCollection> {
+    const host = getInstallHost();
+
+    if (host === 'cursor') {
+        // Cursor profile: full-tree copy via git clone for each gitUrl plugin.
+        // Non-gitUrl plugins are not supported for user-scope on Cursor.
+        const installPromises = plugins
+            .filter((p) => {
+                if (!p.gitUrl) {
+                    getLogger()?.warn(`User-scope install skipped for "${p.name}": no gitUrl (Cursor profile requires a git-cloneable source).`);
+                    return false;
+                }
+                return true;
+            })
+            .map((p) => installCursorLocalPlugin(p, userRoot));
+
+        await Promise.all(installPromises);
+
+        // Cursor local plugins are discovered by Cursor itself from the directory
+        // structure under ~/.cursor/plugins/local — no workspace settings needed.
+        return { skillPaths: [], agentPaths: [], hookPaths: [], mcpPaths: [], lspPaths: [] };
+    }
+
+    // Legacy (VS Code) profile: decomposed install under marketplace/plugin segments.
+    return materializeUserInstallStructureLegacy(userRoot, plugins);
+}
+
+async function materializeUserInstallStructureLegacy(userRoot: string, plugins: MarketplacePlugin[]): Promise<InstalledPathCollection> {
     const skillPaths = new Set<string>();
     const agentPaths = new Set<string>();
     const hookPaths = new Set<string>();
@@ -424,6 +600,21 @@ async function materializeUserInstallStructure(userRoot: string, plugins: Market
         const hooksRoot = path.join(pluginRoot, 'hooks');
         const mcpRoot = path.join(pluginRoot, 'mcp');
         const lspRoot = path.join(pluginRoot, 'lsp');
+
+        if (plugin.gitUrl) {
+            installPromises.push(installPluginFromGit(plugin, skillsRoot, '', agentsRoot, hooksRoot, mcpRoot, lspRoot));
+            for (const group of plugin.groups) {
+                if (group.key === 'skills') { skillPaths.add(skillsRoot); }
+                if (group.key === 'agents') { agentPaths.add(agentsRoot); }
+                if (group.key === 'hooks') { hookPaths.add(hooksRoot); }
+                if (group.key === 'mcp') { mcpPaths.add(mcpRoot); }
+                if (group.key === 'lsp') { lspPaths.add(lspRoot); }
+            }
+            if (plugin.groups.length === 0) {
+                skillPaths.add(skillsRoot);
+            }
+            continue;
+        }
 
         for (const group of plugin.groups) {
             if (group.key === 'skills') {
@@ -505,6 +696,13 @@ async function updateWorkspaceChatFileSettings(paths: InstalledPathCollection): 
         return;
     }
 
+    // Only merge Cursor-style workspace settings when running inside Cursor.
+    // On legacy hosts the paths are still under .agents/skills and .github/agents,
+    // and those do not require an explicit workspace setting entry to be discovered.
+    if (getInstallHost() !== 'cursor') {
+        return;
+    }
+
     const existingSkills = getWorkspaceSettingObject('chat.agentSkillsLocations');
     const existingAgents = getWorkspaceSettingObject('chat.agentFilesLocations');
 
@@ -527,17 +725,17 @@ async function updateWorkspaceChatFileSettings(paths: InstalledPathCollection): 
 }
 
 
-export function resolveAgentsPath(scope: InstallScope): string | undefined {
+export function resolveAgentsPath(scope: InstallScope, workspaceFolder?: vscode.WorkspaceFolder): string | undefined {
     if (scope === 'user') {
-        return path.join(os.homedir(), '.copilot', 'installed-plugins');
+        return resolveUserInstallRoot(getInstallHost());
     }
 
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!workspaceFolder) {
+    const folder = workspaceFolder ?? vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
         return undefined;
     }
 
-    return workspaceFolder.uri.fsPath;
+    return folder.uri.fsPath;
 }
 
 export function buildInstallPayload(

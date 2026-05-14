@@ -3,6 +3,8 @@ import { getLogger } from './logger';
 import { getCache, CacheKeys, MarketplaceCache } from './cache';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
+import { gitCloneShallowToTemp } from './git-clone';
 
 // Event emitter for cache updates (allows UI to refresh when background fetch completes)
 const _onCacheUpdated = new vscode.EventEmitter<string[]>();
@@ -14,10 +16,15 @@ export interface MarketplacePlugin {
 	description?: string;
 	version?: string;
 	downloadUrl?: string;
+	gitUrl?: string;
 	groups: MarketplacePluginGroup[];
 	sourceUrl: string;
 	marketplaceDocumentUrl: string;
 	raw: Record<string, unknown>;
+}
+
+function isGitUrl(url: string): boolean {
+	return url.startsWith('git://') || url.startsWith('git@');
 }
 
 export interface MarketplacePluginGroup {
@@ -34,6 +41,10 @@ export interface MarketplaceGroupItem {
 	docUrl?: string;
 	description?: string;
 	inlineContent?: unknown;
+	/** Absolute path to the primary file on disk (set when content was resolved from a local git clone). */
+	localPath?: string;
+	/** Additional absolute paths to try on disk when `localPath` does not resolve. */
+	localFallbackPaths?: string[];
 }
 
 export interface MarketplaceFetchResult {
@@ -125,15 +136,126 @@ export function resolveMarketplaceDocumentReference(reference: string, baseDocum
 	}
 }
 
+/**
+ * True if the response body is JSON or a small plain-text marketplace redirect (not HTML from a repo browser page).
+ */
+function looksLikeMarketplaceDocumentBody(text: string): boolean {
+	const trimmed = text.trim();
+	if (!trimmed.length) {
+		return false;
+	}
+
+	// Repo hosts return 200 + HTML for the clone URL; do not treat that as marketplace.json.
+	if (trimmed.startsWith('<')) {
+		return false;
+	}
+
+	try {
+		JSON.parse(trimmed);
+		return true;
+	} catch {
+		// Match parseMarketplacePayload: allow a plain-text pointer to another document.
+		if (trimmed.includes('<')) {
+			return false;
+		}
+		return trimmed.length <= 8192;
+	}
+}
+
+const GIT_MARKETPLACE_RELATIVE_PATHS = [
+	'.claude-plugin/marketplace.json',
+	'.cursor-plugin/marketplace.json',
+	'.github/plugin/marketplace.json'
+] as const;
+
+/**
+ * HTTPS URLs that identify a Git remote (not a raw file URL). These are usually served as HTML or 404 on GET, so marketplace.json is read via git clone instead.
+ */
+function isHttpsGitRepoRemote(url: string): boolean {
+	try {
+		const parsed = new URL(url);
+		if (!/^https?:$/i.test(parsed.protocol)) {
+			return false;
+		}
+		const host = parsed.hostname.toLowerCase();
+		const p = parsed.pathname.toLowerCase();
+		if (p.includes('/_git/')) {
+			return host.endsWith('dev.azure.com') || host.endsWith('visualstudio.com');
+		}
+		return p.replace(/\/$/, '').endsWith('.git');
+	} catch {
+		return false;
+	}
+}
+
+async function fetchMarketplaceJsonViaGitClone(
+	gitRemoteUrl: string
+): Promise<{ json: unknown; documentPath: string; tmpDir: string } | undefined> {
+	let tmpDir: string | undefined;
+	try {
+		tmpDir = await gitCloneShallowToTemp(gitRemoteUrl, 'agent-plugins-marketplace');
+		for (const rel of GIT_MARKETPLACE_RELATIVE_PATHS) {
+			const abs = path.join(tmpDir!, ...rel.split('/'));
+			try {
+				const text = (await fs.readFile(abs, 'utf8')).trim();
+				if (!text.length) {
+					continue;
+				}
+				const json = JSON.parse(text) as unknown;
+				if (typeof json === 'object' && json !== null) {
+					// Return tmpDir to caller; caller is responsible for cleanup.
+					const resolvedTmpDir = tmpDir!;
+					tmpDir = undefined;
+					return { json, documentPath: rel, tmpDir: resolvedTmpDir };
+				}
+			} catch {
+				continue;
+			}
+		}
+		getLogger()?.trace(`git clone succeeded but no marketplace.json under standard paths for ${gitRemoteUrl}`);
+		return undefined;
+	} catch (error) {
+		getLogger()?.warn(
+			`Marketplace git clone failed for ${gitRemoteUrl}: ${error instanceof Error ? error.message : String(error)}`
+		);
+		return undefined;
+	} finally {
+		if (tmpDir) {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+		}
+	}
+}
+
+function applyDefaultGitUrlForMonorepoMarketplace(
+	plugin: MarketplacePlugin,
+	marketplaceSourceUrl: string
+): MarketplacePlugin {
+	if (!isHttpsGitRepoRemote(marketplaceSourceUrl)) {
+		return plugin;
+	}
+	if (plugin.gitUrl) {
+		return plugin;
+	}
+	const source = asString(plugin.raw.source);
+	if (
+		source &&
+		!/^https?:\/\//i.test(source) &&
+		!source.startsWith('git@') &&
+		!source.startsWith('git://')
+	) {
+		return { ...plugin, gitUrl: marketplaceSourceUrl };
+	}
+	return plugin;
+}
+
 function candidateMarketplaceUrls(inputUrl: string): string[] {
-	const candidates = new Set<string>();
+	const candidates: string[] = [];
 
 	try {
 		const parsed = new URL(inputUrl);
 		const hostname = parsed.hostname.toLowerCase();
 		if (!/^https?:$/i.test(parsed.protocol)) {
-			candidates.add(inputUrl);
-			return Array.from(candidates);
+			return [inputUrl];
 		}
 
 		if (hostname === 'github.com' || hostname === 'www.github.com') {
@@ -144,32 +266,40 @@ function candidateMarketplaceUrls(inputUrl: string): string[] {
 				if (parts.length >= 5 && parts[2] === 'blob') {
 					const branch = parts[3];
 					const remainder = parts.slice(4).join('/');
-					candidates.add(`https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${remainder}`);
-					return Array.from(candidates);
+					return [`https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${remainder}`];
 				} else {
-					// Try .claude-plugin first, then fall back to .github/plugin
-					candidates.add(`https://raw.githubusercontent.com/${owner}/${repo}/main/.claude-plugin/marketplace.json`);
-					candidates.add(`https://raw.githubusercontent.com/${owner}/${repo}/master/.claude-plugin/marketplace.json`);
-					candidates.add(`https://raw.githubusercontent.com/${owner}/${repo}/main/.github/plugin/marketplace.json`);
-					candidates.add(`https://raw.githubusercontent.com/${owner}/${repo}/master/.github/plugin/marketplace.json`);
-					return Array.from(candidates);
+					// Try .claude-plugin, .cursor-plugin, then .github/plugin
+					return [
+						`https://raw.githubusercontent.com/${owner}/${repo}/main/.claude-plugin/marketplace.json`,
+						`https://raw.githubusercontent.com/${owner}/${repo}/master/.claude-plugin/marketplace.json`,
+						`https://raw.githubusercontent.com/${owner}/${repo}/main/.cursor-plugin/marketplace.json`,
+						`https://raw.githubusercontent.com/${owner}/${repo}/master/.cursor-plugin/marketplace.json`,
+						`https://raw.githubusercontent.com/${owner}/${repo}/main/.github/plugin/marketplace.json`,
+						`https://raw.githubusercontent.com/${owner}/${repo}/master/.github/plugin/marketplace.json`
+					];
 				}
 			}
 		}
 
 		const hasFileName = /\.[a-z0-9]+$/i.test(parsed.pathname);
-		candidates.add(inputUrl);
+		const derived: string[] = [];
 		if (!hasFileName && !parsed.pathname.endsWith('/marketplace.json')) {
-			const pathname = parsed.pathname.endsWith('/') ? parsed.pathname : `${parsed.pathname}/`;
-			candidates.add(`${parsed.origin}${pathname}.claude-plugin/marketplace.json`);
-			candidates.add(`${parsed.origin}${pathname}.github/plugin/marketplace.json`);
+			// Resolve relative to the repo root URL so embedded credentials (e.g. Azure DevOps PAT) are preserved.
+			const dir = new URL(inputUrl);
+			if (!dir.pathname.endsWith('/')) {
+				dir.pathname += '/';
+			}
+			const dirBase = dir.toString();
+			derived.push(new URL('.claude-plugin/marketplace.json', dirBase).toString());
+			derived.push(new URL('.cursor-plugin/marketplace.json', dirBase).toString());
+			derived.push(new URL('.github/plugin/marketplace.json', dirBase).toString());
 		}
-	} catch {
-		candidates.add(inputUrl);
-		return Array.from(candidates);
-	}
 
-	return Array.from(candidates);
+		// Prefer explicit marketplace paths over the bare repo URL (which often returns HTML 200).
+		return [...derived, inputUrl];
+	} catch {
+		return [inputUrl];
+	}
 }
 
 function isGitHubUrl(url: string): boolean {
@@ -221,10 +351,16 @@ async function resolveMarketplaceUrl(inputUrl: string): Promise<{ documentUrl?: 
 		try {
 			const response = await authenticatedFetch(candidate, { method: 'GET' });
 			if (response.ok) {
-				return { documentUrl: candidate, warnings: [], errors: [] };
+				const body = await response.text();
+				if (looksLikeMarketplaceDocumentBody(body)) {
+					return { documentUrl: candidate, warnings: [], errors: [] };
+				}
+				getLogger()?.trace(`Marketplace candidate returned non-JSON/HTML (${response.status}): ${candidate}`);
+				warnings.push(`Skipped non-marketplace response (not JSON): ${candidate}`);
+			} else {
+				getLogger()?.trace(`Marketplace candidate failed (${response.status} ${response.statusText}): ${candidate}`);
+				warnings.push(`Marketplace candidate failed (${response.status}): ${candidate}`);
 			}
-			getLogger()?.trace(`Marketplace candidate failed (${response.status} ${response.statusText}): ${candidate}`);
-			warnings.push(`Marketplace candidate failed (${response.status}): ${candidate}`);
 		} catch (error) {
 			getLogger()?.trace(`Marketplace candidate unreachable: ${candidate} - ${error instanceof Error ? error.message : String(error)}`);
 			warnings.push(`Marketplace candidate unreachable: ${candidate} (${error instanceof Error ? error.message : String(error)})`);
@@ -568,11 +704,13 @@ async function expandGroupDirectoryReference(
 		});
 	}
 
-	const markdownFiles = entries.filter(
-		(entry) => entry.type === 'file' && typeof entry.name === 'string' && /\.md$/i.test(entry.name)
-	);
-	if (markdownFiles.length > 0) {
-		return markdownFiles.map((entry) => {
+	// For rules directories, .mdc files (Cursor rule format) are first-class
+	// alongside .md. For other groups, only .md is treated as a leaf file.
+	const ruleFiles = groupKey === 'rules'
+		? entries.filter((entry) => entry.type === 'file' && typeof entry.name === 'string' && /\.(md|mdc)$/i.test(entry.name))
+		: entries.filter((entry) => entry.type === 'file' && typeof entry.name === 'string' && /\.md$/i.test(entry.name));
+	if (ruleFiles.length > 0) {
+		return ruleFiles.map((entry) => {
 			const item = buildItemFromPath(`${cleanedPath}/${entry.name ?? ''}`, groupKey, repoContext);
 			return {
 				...item,
@@ -594,6 +732,14 @@ function descriptorDefaultsForGroup(groupKey: string, itemName?: string): string
 	const agentMarkdownNameCandidate = normalizedItemName ? `${normalizedItemName}.agent.md` : undefined;
 
 	switch (groupKey) {
+		case 'rules': {
+			const mdcCandidate = normalizedItemName ? `${normalizedItemName}.mdc` : undefined;
+			return [
+				...(mdcCandidate ? [mdcCandidate] : []),
+				...(markdownNameCandidate ? [markdownNameCandidate] : []),
+				'README.md'
+			];
+		}
 		case 'skills':
 			return ['SKILL.md', 'README.md', ...(markdownNameCandidate ? [markdownNameCandidate] : [])];
 		case 'agents':
@@ -620,7 +766,7 @@ function looksLikeFilePath(pathValue: string): boolean {
 	return /\.[a-z0-9]+$/i.test(path.posix.basename(pathValue));
 }
 
-function buildItemFromPath(pathValue: string, groupKey: string, repoContext?: RepoContext): MarketplaceGroupItem {
+function buildItemFromPath(pathValue: string, groupKey: string, repoContext?: RepoContext, localCloneDir?: string): MarketplaceGroupItem {
 	const cleanedPath = normalizeRelativePath(pathValue);
 
 	// Extract the last path segment as the display name
@@ -628,13 +774,49 @@ function buildItemFromPath(pathValue: string, groupKey: string, repoContext?: Re
 	const displayName = pathSegments.length > 0 ? pathSegments[pathSegments.length - 1] : cleanedPath;
 	const descriptorFiles = descriptorDefaultsForGroup(groupKey, displayName);
 
-	if (!repoContext || isHttpUrl(cleanedPath)) {
+	if (isHttpUrl(cleanedPath)) {
 		return {
 			name: displayName,
 			path: cleanedPath,
-			metadataUrl: isHttpUrl(cleanedPath) ? cleanedPath : undefined,
+			metadataUrl: cleanedPath,
 			metadataFallbackUrls: [],
-			docUrl: isHttpUrl(cleanedPath) ? cleanedPath : undefined
+			docUrl: cleanedPath
+		};
+	}
+
+	// When a local clone dir is available (git-based repos with no HTTP raw URL), resolve files on disk.
+	if (!repoContext && localCloneDir) {
+		const isMarkdownPath = /\.md$/i.test(cleanedPath);
+		const isFilePath = isMarkdownPath || looksLikeFilePath(cleanedPath);
+		if (isFilePath) {
+			const localPath = path.join(localCloneDir, ...cleanedPath.split('/'));
+			return {
+				name: displayName,
+				path: cleanedPath,
+				metadataFallbackUrls: [],
+				localPath
+			};
+		}
+
+		const localCandidates = descriptorFiles.map((fileName) =>
+			path.join(localCloneDir, ...cleanedPath.split('/'), fileName)
+		);
+		return {
+			name: displayName,
+			path: cleanedPath,
+			metadataFallbackUrls: [],
+			localPath: localCandidates[0],
+			localFallbackPaths: localCandidates.slice(1)
+		};
+	}
+
+	if (!repoContext) {
+		return {
+			name: displayName,
+			path: cleanedPath,
+			metadataUrl: undefined,
+			metadataFallbackUrls: [],
+			docUrl: undefined
 		};
 	}
 
@@ -662,7 +844,7 @@ function buildItemFromPath(pathValue: string, groupKey: string, repoContext?: Re
 	};
 }
 
-function buildGroupItem(entry: unknown, groupKey: string, repoContext?: RepoContext, sourceBasePath?: string): MarketplaceGroupItem | undefined {
+function buildGroupItem(entry: unknown, groupKey: string, repoContext?: RepoContext, sourceBasePath?: string, localCloneDir?: string): MarketplaceGroupItem | undefined {
 	const resolvePath = (pathValue: string): string => {
 		const normalizedPath = normalizeRelativePath(pathValue);
 		if (isHttpUrl(pathValue) || !sourceBasePath) {
@@ -672,7 +854,7 @@ function buildGroupItem(entry: unknown, groupKey: string, repoContext?: RepoCont
 	};
 
 	if (typeof entry === 'string') {
-		return buildItemFromPath(resolvePath(entry), groupKey, repoContext);
+		return buildItemFromPath(resolvePath(entry), groupKey, repoContext, localCloneDir);
 	}
 
 	const record = asRecord(entry);
@@ -682,7 +864,7 @@ function buildGroupItem(entry: unknown, groupKey: string, repoContext?: RepoCont
 
 	const pathValue = asString(record.path) ?? asString(record.source) ?? asString(record.url);
 	if (pathValue) {
-		const base = buildItemFromPath(resolvePath(pathValue), groupKey, repoContext);
+		const base = buildItemFromPath(resolvePath(pathValue), groupKey, repoContext, localCloneDir);
 		return {
 			...base,
 			name: summaryFromRecord(record) ?? base.name,
@@ -702,15 +884,15 @@ function buildGroupItem(entry: unknown, groupKey: string, repoContext?: RepoCont
 	};
 }
 
-function toGroupItems(value: unknown, groupKey: string, repoContext?: RepoContext, sourceBasePath?: string): MarketplaceGroupItem[] {
+function toGroupItems(value: unknown, groupKey: string, repoContext?: RepoContext, sourceBasePath?: string, localCloneDir?: string): MarketplaceGroupItem[] {
 	if (typeof value === 'string') {
-		const item = buildGroupItem(value, groupKey, repoContext, sourceBasePath);
+		const item = buildGroupItem(value, groupKey, repoContext, sourceBasePath, localCloneDir);
 		return item ? [item] : [];
 	}
 
 	if (Array.isArray(value)) {
 		return value
-			.map((entry) => buildGroupItem(entry, groupKey, repoContext, sourceBasePath))
+			.map((entry) => buildGroupItem(entry, groupKey, repoContext, sourceBasePath, localCloneDir))
 			.filter((entry): entry is MarketplaceGroupItem => Boolean(entry));
 	}
 
@@ -731,7 +913,7 @@ function toGroupItems(value: unknown, groupKey: string, repoContext?: RepoContex
 
 	const items: MarketplaceGroupItem[] = [];
 	for (const [key, entryValue] of Object.entries(record)) {
-		const item = buildGroupItem(entryValue, groupKey, repoContext, sourceBasePath);
+		const item = buildGroupItem(entryValue, groupKey, repoContext, sourceBasePath, localCloneDir);
 		if (item) {
 			items.push(item);
 			continue;
@@ -758,10 +940,10 @@ function mergeGroupItems(primary: MarketplaceGroupItem[], secondary: Marketplace
 	return Array.from(deduped.values());
 }
 
-function collectGroupValues(record: UnknownRecord, sourceKey: string, groupKey: string, repoContext?: RepoContext, sourceBasePath?: string): MarketplaceGroupItem[] {
+function collectGroupValues(record: UnknownRecord, sourceKey: string, groupKey: string, repoContext?: RepoContext, sourceBasePath?: string, localCloneDir?: string): MarketplaceGroupItem[] {
 	const manifest = asRecord(record.manifest);
-	const primary = toGroupItems(record[sourceKey], groupKey, repoContext, sourceBasePath);
-	const secondary = toGroupItems(manifest?.[sourceKey], groupKey, repoContext, sourceBasePath);
+	const primary = toGroupItems(record[sourceKey], groupKey, repoContext, sourceBasePath, localCloneDir);
+	const secondary = toGroupItems(manifest?.[sourceKey], groupKey, repoContext, sourceBasePath, localCloneDir);
 	return mergeGroupItems(primary, secondary);
 }
 
@@ -770,11 +952,12 @@ function collectGroupValuesForKeys(
 	keys: string[],
 	groupKey: string,
 	repoContext?: RepoContext,
-	sourceBasePath?: string
+	sourceBasePath?: string,
+	localCloneDir?: string
 ): MarketplaceGroupItem[] {
 	let merged: MarketplaceGroupItem[] = [];
 	for (const key of keys) {
-		const items = collectGroupValues(record, key, groupKey, repoContext, sourceBasePath)
+		const items = collectGroupValues(record, key, groupKey, repoContext, sourceBasePath, localCloneDir)
 			.map((item) => ({ ...item, path: item.path ? normalizeRelativePath(item.path) : item.path }));
 		merged = mergeGroupItems(merged, items);
 	}
@@ -782,8 +965,9 @@ function collectGroupValuesForKeys(
 	return merged.map((item) => ({ ...item, path: item.path, metadataFallbackUrls: item.metadataFallbackUrls }));
 }
 
-function extractPluginGroups(record: UnknownRecord, repoContext?: RepoContext, sourceBasePath?: string): MarketplacePluginGroup[] {
+function extractPluginGroups(record: UnknownRecord, repoContext?: RepoContext, sourceBasePath?: string, localCloneDir?: string): MarketplacePluginGroup[] {
 	const groupDefinitions = [
+		{ key: 'rules', name: 'Rules', sourceKeys: ['rules'] },
 		{ key: 'skills', name: 'Skills', sourceKeys: ['skills'] },
 		{ key: 'agents', name: 'Agents', sourceKeys: ['agents'] },
 		{ key: 'hooks', name: 'Hooks', sourceKeys: ['hooks'] },
@@ -797,7 +981,7 @@ function extractPluginGroups(record: UnknownRecord, repoContext?: RepoContext, s
 
 	const groups: MarketplacePluginGroup[] = [];
 	for (const definition of groupDefinitions) {
-		const items = collectGroupValuesForKeys(record, definition.sourceKeys, definition.key, repoContext, sourceBasePath);
+		const items = collectGroupValuesForKeys(record, definition.sourceKeys, definition.key, repoContext, sourceBasePath, localCloneDir);
 		if (items.length > 0) {
 			groups.push({
 				name: definition.name,
@@ -814,6 +998,7 @@ async function fetchPluginSourceConfig(sourcePath: string, repoContext: RepoCont
 	const cleanedSource = normalizeRelativePath(sourcePath).replace(/\/+$/, '');
 	const basePath = cleanedSource.length > 0 ? cleanedSource : '';
 	const candidates = [
+		`${repoContext.rawBaseUrl}/${basePath ? `${basePath}/` : ''}.cursor-plugin/plugin.json`,
 		`${repoContext.rawBaseUrl}/${basePath ? `${basePath}/` : ''}.claude-plugin/plugin.json`,
 		`${repoContext.rawBaseUrl}/${basePath ? `${basePath}/` : ''}.github/plugin/plugin.json`,
 		`${repoContext.rawBaseUrl}/${basePath ? `${basePath}/` : ''}plugin.json`
@@ -952,6 +1137,7 @@ async function hydratePluginGroupsFromSource(
 	}
 
 	const groupDefinitions = [
+		{ key: 'rules', name: 'Rules', sourceKeys: ['rules'] },
 		{ key: 'skills', name: 'Skills', sourceKeys: ['skills'] },
 		{ key: 'agents', name: 'Agents', sourceKeys: ['agents'] },
 		{ key: 'hooks', name: 'Hooks', sourceKeys: ['hooks'] },
@@ -1020,6 +1206,296 @@ async function hydratePluginGroupsFromSource(
 	};
 }
 
+/**
+ * Local-disk equivalent of `hydratePluginGroupsFromSource` used when a marketplace
+ * was loaded via git clone.  Reads `plugin.json` from the cloned directory tree,
+ * discovers group sub-directories by listing the filesystem, and populates
+ * `localPath` / `localFallbackPaths` on each item so that `fetchGroupItemContent`
+ * can read them directly from disk.
+ */
+async function hydratePluginGroupsFromLocalClone(
+	plugin: MarketplacePlugin,
+	cloneDir: string
+): Promise<MarketplacePlugin> {
+	if (plugin.groups.length > 0) {
+		return plugin;
+	}
+
+	const source = asString(plugin.raw.source) ?? './';
+	const sourceBasePath = normalizeRelativePath(source).replace(/\/+$/, '');
+	const pluginDir = sourceBasePath
+		? path.join(cloneDir, ...sourceBasePath.split('/'))
+		: cloneDir;
+
+	// Read plugin.json from standard locations inside the plugin directory.
+	let sourceConfig: UnknownRecord | undefined;
+	const pluginConfigCandidates = [
+		path.join(pluginDir, '.cursor-plugin', 'plugin.json'),
+		path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+		path.join(pluginDir, '.github', 'plugin', 'plugin.json'),
+		path.join(pluginDir, 'plugin.json')
+	];
+	for (const candidate of pluginConfigCandidates) {
+		try {
+			const text = await fs.readFile(candidate, 'utf8');
+			const parsed = JSON.parse(text) as unknown;
+			const record = asRecord(parsed);
+			if (record) {
+				sourceConfig = record;
+				break;
+			}
+		} catch {
+			continue;
+		}
+	}
+
+	const hydratedName = asString(sourceConfig?.name) ?? plugin.name;
+	const hydratedDescription = asString(sourceConfig?.description) ?? plugin.description;
+	const hydratedVersion = asString(sourceConfig?.version) ?? plugin.version;
+
+	const groupDefinitions = [
+		{ key: 'rules', name: 'Rules', sourceKeys: ['rules'] },
+		{ key: 'skills', name: 'Skills', sourceKeys: ['skills'] },
+		{ key: 'agents', name: 'Agents', sourceKeys: ['agents'] },
+		{ key: 'hooks', name: 'Hooks', sourceKeys: ['hooks'] },
+		{ key: 'mcp', name: 'MCP', sourceKeys: ['mcp', 'mcpServers'] },
+		{ key: 'lsp', name: 'LSP', sourceKeys: ['lsp', 'lspServers'] },
+		{ key: 'commands', name: 'Commands', sourceKeys: ['commands'] },
+		{ key: 'tools', name: 'Tools', sourceKeys: ['tools'] },
+		{ key: 'prompts', name: 'Prompts', sourceKeys: ['prompts'] },
+		{ key: 'workflows', name: 'Workflows', sourceKeys: ['workflows'] }
+	];
+
+	const manifest = sourceConfig ? asRecord(sourceConfig.manifest) : undefined;
+	const hydratedGroups: MarketplacePluginGroup[] = [];
+
+	for (const definition of groupDefinitions) {
+		// Find the configured value for this group key.
+		let groupValue: unknown;
+		for (const sourceKey of definition.sourceKeys) {
+			groupValue = sourceConfig?.[sourceKey] ?? manifest?.[sourceKey];
+			if (typeof groupValue !== 'undefined') {
+				break;
+			}
+		}
+
+		if (typeof groupValue !== 'undefined') {
+			// Resolve explicit config entries to local paths.
+			const items = await resolveLocalGroupItems(groupValue, definition.key, pluginDir, sourceBasePath);
+			if (items.length > 0) {
+				hydratedGroups.push({ name: definition.name, key: definition.key, items });
+			}
+			continue;
+		}
+
+		// Auto-discovery: check if a convention directory exists (e.g. "skills/", "rules/").
+		const conventionLocalRel = definition.key;
+		const conventionDisplayRel = sourceBasePath ? `${sourceBasePath}/${definition.key}` : definition.key;
+		const conventionAbs = path.join(pluginDir, definition.key);
+		try {
+			await fs.access(conventionAbs);
+			const items = await expandLocalPath(conventionLocalRel, conventionDisplayRel, definition.key, pluginDir);
+			if (items.length > 0) {
+				hydratedGroups.push({ name: definition.name, key: definition.key, items });
+			}
+		} catch {
+			// Directory doesn't exist — skip.
+		}
+	}
+
+	getLogger()?.trace(`hydratePluginGroupsFromLocalClone for "${plugin.name}": ${hydratedGroups.map(g => `${g.name}(${g.items.length})`).join(', ')}`);
+
+	if (hydratedGroups.length === 0) {
+		return { ...plugin, name: hydratedName, description: hydratedDescription, version: hydratedVersion };
+	}
+
+	return { ...plugin, name: hydratedName, description: hydratedDescription, version: hydratedVersion, groups: hydratedGroups };
+}
+
+/**
+ * Resolve a group config value (string path, array, or object) to a list of
+ * `MarketplaceGroupItem`s backed by local disk paths.
+ *
+ * All paths from `plugin.json` are relative to `pluginDir`.
+ * `sourceBasePath` is only used when constructing the `path` field on items
+ * (for display / install purposes) so it mirrors how the HTTP path would look.
+ */
+async function resolveLocalGroupItems(
+	value: unknown,
+	groupKey: string,
+	pluginDir: string,
+	sourceBasePath: string
+): Promise<MarketplaceGroupItem[]> {
+	if (typeof value === 'string') {
+		const normalizedRelative = normalizeRelativePath(value);
+		const displayRelPath = sourceBasePath ? `${sourceBasePath}/${normalizedRelative}` : normalizedRelative;
+		return expandLocalPath(normalizedRelative, displayRelPath, groupKey, pluginDir);
+	}
+
+	if (Array.isArray(value)) {
+		const items: MarketplaceGroupItem[] = [];
+		for (const entry of value) {
+			if (typeof entry === 'string') {
+				const normalizedRelative = normalizeRelativePath(entry);
+				const displayRelPath = sourceBasePath ? `${sourceBasePath}/${normalizedRelative}` : normalizedRelative;
+				items.push(...(await expandLocalPath(normalizedRelative, displayRelPath, groupKey, pluginDir)));
+			} else {
+				const record = asRecord(entry);
+				if (record) {
+					const pathValue = asString(record.path) ?? asString(record.source) ?? asString(record.url);
+					if (pathValue) {
+						const normalizedRelative = normalizeRelativePath(pathValue);
+						const displayRelPath = sourceBasePath ? `${sourceBasePath}/${normalizedRelative}` : normalizedRelative;
+						const expanded = await expandLocalPath(normalizedRelative, displayRelPath, groupKey, pluginDir);
+						for (const base of expanded) {
+							items.push({
+								...base,
+								name: summaryFromRecord(record) ?? base.name,
+								description: asString(record.description) ?? base.description
+							});
+						}
+					} else {
+						const name = summaryFromRecord(record);
+						if (name) {
+							items.push({ name, metadataFallbackUrls: [], description: asString(record.description) });
+						}
+					}
+				}
+			}
+		}
+		return items;
+	}
+
+	return [];
+}
+
+/**
+ * Expand a plugin-relative path into one or more group items.
+ * If the path is a directory, enumerates subdirectories (leaf items) or flat
+ * `.md`/`.mdc` files, mirroring the behaviour of `expandGroupDirectoryReference`.
+ * If the path is a file, returns a single item.
+ */
+async function expandLocalPath(
+	localRelPath: string,
+	displayRelPath: string,
+	groupKey: string,
+	pluginDir: string
+): Promise<MarketplaceGroupItem[]> {
+	const absPath = localRelPath
+		? path.join(pluginDir, ...localRelPath.split('/'))
+		: pluginDir;
+
+	let stat: import('node:fs').Stats | undefined;
+	try {
+		stat = await fs.stat(absPath);
+	} catch {
+		// Path doesn't exist; return a single item so it still appears in the tree.
+		const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+		return item ? [item] : [];
+	}
+
+	if (!stat.isDirectory()) {
+		// It's a file — return directly.
+		const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+		return item ? [item] : [];
+	}
+
+	// It's a directory — enumerate contents.
+	let entries: import('node:fs').Dirent[];
+	try {
+		entries = await fs.readdir(absPath, { withFileTypes: true });
+	} catch {
+		const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+		return item ? [item] : [];
+	}
+
+	// If the directory itself IS a leaf item (contains the primary descriptor), don't expand.
+	const primaryDescriptor = primaryDescriptorForGroup(groupKey);
+	if (primaryDescriptor) {
+		const hasPrimary = entries.some(
+			(e) => e.isFile() && e.name.toLowerCase() === primaryDescriptor.toLowerCase()
+		);
+		if (hasPrimary) {
+			const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+			return item ? [item] : [];
+		}
+	}
+
+	// Sub-directories → one item each (e.g. skills/demo-skill/).
+	const subdirs = entries.filter((e) => e.isDirectory());
+	if (subdirs.length > 0) {
+		return subdirs.map((e) => {
+			const subLocal = localRelPath ? `${localRelPath}/${e.name}` : e.name;
+			const subDisplay = displayRelPath ? `${displayRelPath}/${e.name}` : e.name;
+			return buildLocalItemFromRelPath(subLocal, subDisplay, groupKey, pluginDir) ?? {
+				name: e.name,
+				metadataFallbackUrls: []
+			};
+		}).filter(Boolean) as MarketplaceGroupItem[];
+	}
+
+	// Flat files (.md / .mdc for rules, .md for others).
+	const filePattern = groupKey === 'rules' ? /\.(md|mdc)$/i : /\.md$/i;
+	const fileEntries = entries.filter((e) => e.isFile() && filePattern.test(e.name));
+	if (fileEntries.length > 0) {
+		return fileEntries.map((e) => {
+			const fileLocal = localRelPath ? `${localRelPath}/${e.name}` : e.name;
+			const fileDisplay = displayRelPath ? `${displayRelPath}/${e.name}` : e.name;
+			const item = buildLocalItemFromRelPath(fileLocal, fileDisplay, groupKey, pluginDir);
+			return item ? { ...item, name: e.name } : undefined;
+		}).filter((e): e is MarketplaceGroupItem => Boolean(e));
+	}
+
+	// Nothing useful found — fall back to a single item for the directory itself.
+	const item = buildLocalItemFromRelPath(localRelPath, displayRelPath, groupKey, pluginDir);
+	return item ? [item] : [];
+}
+
+/**
+ * Build a single `MarketplaceGroupItem` for a path relative to `pluginDir`.
+ * If `localRelPath` points directly to a file (has an extension), `localPath` is the
+ * file itself.  Otherwise descriptor file candidates are resolved under the directory.
+ */
+function buildLocalItemFromRelPath(
+	localRelPath: string,
+	displayRelPath: string,
+	groupKey: string,
+	pluginDir: string
+): MarketplaceGroupItem | undefined {
+	const cleanedLocal = normalizeRelativePath(localRelPath);
+	if (!cleanedLocal) {
+		return undefined;
+	}
+
+	const displayCleaned = normalizeRelativePath(displayRelPath) || cleanedLocal;
+	const pathSegments = displayCleaned.split('/').filter(Boolean);
+	const displayName = pathSegments.length > 0 ? pathSegments[pathSegments.length - 1] : displayCleaned;
+
+	// If the path already points to a file (has a file extension), use it directly.
+	if (looksLikeFilePath(cleanedLocal)) {
+		return {
+			name: displayName,
+			path: displayCleaned,
+			metadataFallbackUrls: [],
+			localPath: path.join(pluginDir, ...cleanedLocal.split('/'))
+		};
+	}
+
+	// Otherwise treat it as a directory and look for descriptor files inside.
+	const descriptorFiles = descriptorDefaultsForGroup(groupKey, displayName);
+	const localCandidates = descriptorFiles.map((fileName) =>
+		path.join(pluginDir, ...cleanedLocal.split('/'), fileName)
+	);
+
+	return {
+		name: displayName,
+		path: displayCleaned,
+		metadataFallbackUrls: [],
+		localPath: localCandidates[0],
+		localFallbackPaths: localCandidates.slice(1)
+	};
+}
+
 function getPluginList(document: unknown): unknown[] {
 	if (Array.isArray(document)) {
 		return document;
@@ -1045,7 +1521,8 @@ function normalizePlugin(
 	entry: unknown,
 	sourceUrl: string,
 	marketplaceDocumentUrl: string,
-	repoContext?: RepoContext
+	repoContext?: RepoContext,
+	localCloneDir?: string
 ): { plugin?: MarketplacePlugin; warning?: string } {
 	const record = asRecord(entry);
 	if (!record) {
@@ -1066,9 +1543,11 @@ function normalizePlugin(
 		'unknown';
 	const downloadUrl =
 		asString(record.downloadUrl) ?? asString(record.url) ?? asString(asRecord(record.package)?.url);
+	const rawGitUrl = asString(record.gitUrl);
+	const gitUrl = rawGitUrl ?? (downloadUrl && isGitUrl(downloadUrl) ? downloadUrl : undefined);
 	const source = asString(record.source);
 	const sourceBasePath = source ? normalizeRelativePath(source).replace(/\/+$/, '') : undefined;
-	const groups = extractPluginGroups(record, repoContext, sourceBasePath);
+	const groups = extractPluginGroups(record, repoContext, sourceBasePath, localCloneDir);
 
 	return {
 		plugin: {
@@ -1077,6 +1556,7 @@ function normalizePlugin(
 			description,
 			version,
 			downloadUrl,
+			gitUrl,
 			groups,
 			sourceUrl,
 			marketplaceDocumentUrl,
@@ -1089,7 +1569,8 @@ export function normalizeMarketplaceDocument(
 	document: unknown,
 	sourceUrl: string,
 	marketplaceDocumentUrl: string = sourceUrl,
-	repoContext?: RepoContext
+	repoContext?: RepoContext,
+	localCloneDir?: string
 ): MarketplaceFetchResult {
 	if (!repoContext) {
 		repoContext = repoContextFromRawUrl(marketplaceDocumentUrl);
@@ -1104,7 +1585,7 @@ export function normalizeMarketplaceDocument(
 	}
 
 	for (const entry of entries) {
-		const normalized = normalizePlugin(entry, sourceUrl, marketplaceDocumentUrl, repoContext);
+		const normalized = normalizePlugin(entry, sourceUrl, marketplaceDocumentUrl, repoContext, localCloneDir);
 		if (normalized.warning) {
 			warnings.push(normalized.warning);
 		}
@@ -1121,8 +1602,64 @@ export function normalizeMarketplaceDocument(
 }
 
 export async function fetchMarketplace(sourceUrl: string): Promise<MarketplaceFetchResult> {
+	if (isHttpsGitRepoRemote(sourceUrl)) {
+		getLogger()?.info(`Resolving marketplace via git clone for ${sourceUrl}`);
+		const gitResult = await fetchMarketplaceJsonViaGitClone(sourceUrl);
+		if (gitResult) {
+			const marketplaceDocumentUrl = `${sourceUrl}#${gitResult.documentPath}`;
+			const normalized = normalizeMarketplaceDocument(
+				gitResult.json,
+				sourceUrl,
+				marketplaceDocumentUrl,
+				undefined,
+				gitResult.tmpDir
+			);
+			const hydratedPlugins: MarketplacePlugin[] = [];
+			for (const plugin of normalized.plugins) {
+				hydratedPlugins.push(await hydratePluginGroupsFromLocalClone(plugin, gitResult.tmpDir));
+			}
+			normalized.plugins = hydratedPlugins;
+			fs.rm(gitResult.tmpDir, { recursive: true, force: true }).catch(() => undefined);
+			normalized.plugins = normalized.plugins.map((p) =>
+				applyDefaultGitUrlForMonorepoMarketplace(p, sourceUrl)
+			);
+			normalized.warnings.unshift(
+				`Resolved marketplace document via git clone (${gitResult.documentPath}).`
+			);
+			getLogger()?.trace(`Normalized ${normalized.plugins.length} plugin(s) from ${sourceUrl} (git)`);
+			return normalized;
+		}
+	}
+
 	const resolution = await resolveMarketplaceUrl(sourceUrl);
 	if (!resolution.documentUrl) {
+		if (!isHttpsGitRepoRemote(sourceUrl)) {
+			const gitRetry = await fetchMarketplaceJsonViaGitClone(sourceUrl);
+			if (gitRetry) {
+				const marketplaceDocumentUrl = `${sourceUrl}#${gitRetry.documentPath}`;
+				const normalized = normalizeMarketplaceDocument(
+					gitRetry.json,
+					sourceUrl,
+					marketplaceDocumentUrl,
+					undefined,
+					gitRetry.tmpDir
+				);
+				const hydratedPlugins: MarketplacePlugin[] = [];
+				for (const plugin of normalized.plugins) {
+					hydratedPlugins.push(await hydratePluginGroupsFromLocalClone(plugin, gitRetry.tmpDir));
+				}
+				normalized.plugins = hydratedPlugins;
+				fs.rm(gitRetry.tmpDir, { recursive: true, force: true }).catch(() => undefined);
+				normalized.plugins = normalized.plugins.map((p) =>
+					applyDefaultGitUrlForMonorepoMarketplace(p, sourceUrl)
+				);
+				normalized.warnings.unshift(
+					`Resolved marketplace document via git clone (${gitRetry.documentPath}).`,
+					...resolution.warnings
+				);
+				return normalized;
+			}
+		}
 		// No marketplace.json found - try direct repo discovery for GitHub URLs
 		const repoContext = await repoContextFromGitHubUrl(sourceUrl);
 		if (repoContext) {
@@ -1189,6 +1726,10 @@ export async function fetchMarketplace(sourceUrl: string): Promise<MarketplaceFe
 			}
 			normalized.plugins = hydratedPlugins;
 		}
+
+		normalized.plugins = normalized.plugins.map((p) =>
+			applyDefaultGitUrlForMonorepoMarketplace(p, sourceUrl)
+		);
 
 		normalized.warnings.unshift(...warnings);
 		return normalized;
@@ -1430,6 +1971,20 @@ function extractDescriptorSummary(markdown: string): string | undefined {
 }
 
 export async function fetchGroupItemDescription(item: MarketplaceGroupItem): Promise<string | undefined> {
+	// Try local disk paths first (git-clone based repos).
+	const localPaths = [item.localPath, ...(item.localFallbackPaths ?? [])].filter((entry): entry is string => Boolean(entry));
+	for (const localPath of localPaths) {
+		try {
+			const content = await fs.readFile(localPath, 'utf8');
+			const summary = extractDescriptorSummary(content);
+			if (summary) {
+				return summary;
+			}
+		} catch {
+			continue;
+		}
+	}
+
 	const urls = [item.metadataUrl, ...item.metadataFallbackUrls].filter((entry): entry is string => Boolean(entry));
 	for (const url of urls) {
 		try {
@@ -1456,6 +2011,17 @@ export async function fetchGroupItemContent(item: MarketplaceGroupItem): Promise
 		return {
 			content: `${JSON.stringify(item.inlineContent, null, 2)}\n`
 		};
+	}
+
+	// Try local disk paths first (git-clone based repos).
+	const localPaths = [item.localPath, ...(item.localFallbackPaths ?? [])].filter((entry): entry is string => Boolean(entry));
+	for (const localPath of localPaths) {
+		try {
+			const content = await fs.readFile(localPath, 'utf8');
+			return { content };
+		} catch {
+			continue;
+		}
 	}
 
 	const urls = [item.metadataUrl, ...item.metadataFallbackUrls].filter((entry): entry is string => Boolean(entry));

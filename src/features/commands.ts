@@ -17,6 +17,7 @@ import {
     resolveAgentsPath,
     type InstallScope
 } from './delegation';
+import { getInstallHost, resolveUserInstallRoot } from './ide-host';
 import {
     fetchAllMarketplaces,
     fetchGroupItemDescription,
@@ -177,13 +178,61 @@ export async function removeMarketplaceFromTree({ logger }: ExtensionServices, n
     vscode.window.showInformationMessage('Marketplace removed.');
 }
 
+function workspaceSummary(workspaceRoot: string, host: ReturnType<typeof getInstallHost>): string {
+    if (host === 'cursor') {
+        return `Rules/Skills/Agents/Hooks/MCP/LSP: ${workspaceRoot}\\.cursor\\<component>\\<plugin>`;
+    }
+    return `Skills: ${workspaceRoot}\\.agents\\skills\nAgents: ${workspaceRoot}\\.github\\agents\nHooks: ${workspaceRoot}\\.github\\hooks\nMCP: ${workspaceRoot}\\.github\\mcp\nLSP: ${workspaceRoot}\\.github\\lsp`;
+}
+
+function workspaceSuccessMessage(count: number, workspaceRoot: string, host: ReturnType<typeof getInstallHost>): string {
+    if (host === 'cursor') {
+        return `Installed/updated ${count} plugin(s) in workspace under .cursor/ (rules, skills, agents, hooks, mcp, lsp).`;
+    }
+    return `Installed/updated ${count} plugin(s) in workspace (.agents/skills, .github/agents, .github/hooks, .github/mcp, .github/lsp).`;
+}
+
+function userSuccessMessage(count: number, host: ReturnType<typeof getInstallHost>): string {
+    const root = resolveUserInstallRoot(host);
+    if (host === 'cursor') {
+        return `Installed/updated ${count} plugin(s) to ${root}/ (Cursor local plugins).`;
+    }
+    return `Installed/updated ${count} plugin(s) in user scope (${root}).`;
+}
+
+async function pickWorkspaceFolder(): Promise<vscode.WorkspaceFolder | undefined> {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders?.length) {
+        return undefined;
+    }
+    if (folders.length === 1) {
+        return folders[0];
+    }
+    const pick = await vscode.window.showQuickPick(
+        folders.map((f) => ({ label: f.name, description: f.uri.fsPath, folder: f })),
+        { placeHolder: 'Select the workspace folder to install into' }
+    );
+    return pick?.folder;
+}
+
 async function performDelegatedInstall(
     services: ExtensionServices,
     marketplaceUrls: string[],
     selectedPlugins: MarketplacePlugin[],
     scope: InstallScope
 ): Promise<void> {
-    const targetPath = resolveAgentsPath(scope);
+    const host = getInstallHost();
+
+    let workspaceFolder: vscode.WorkspaceFolder | undefined;
+    if (scope === 'workspace') {
+        workspaceFolder = await pickWorkspaceFolder();
+        if (!workspaceFolder) {
+            vscode.window.showErrorMessage('Workspace scope install requires an open workspace folder.');
+            return;
+        }
+    }
+
+    const targetPath = resolveAgentsPath(scope, workspaceFolder);
     if (!targetPath) {
         vscode.window.showErrorMessage('Workspace scope install requires an open workspace folder.');
         return;
@@ -191,8 +240,8 @@ async function performDelegatedInstall(
 
     const targetSummary =
         scope === 'workspace'
-            ? `Skills: ${targetPath}\\.agents\\skills\nAgents: ${targetPath}\\.github\\agents\nHooks: ${targetPath}\\.github\\hooks\nMCP: ${targetPath}\\.github\\mcp\nLSP: ${targetPath}\\.github\\lsp`
-            : `Root: ${targetPath}\\<marketplace-name>\\<plugin-name>\\(skills|agents|hooks|mcp|lsp)`;
+            ? workspaceSummary(targetPath, host)
+            : `Root: ${resolveUserInstallRoot(host)}`;
 
     const confirmation = await vscode.window.showWarningMessage(
         `Install/update ${selectedPlugins.length} plugin(s) in ${scope} scope?\n${targetSummary}`,
@@ -208,12 +257,11 @@ async function performDelegatedInstall(
     services.logger.info(`Installing ${selectedPlugins.length} plugin(s) to ${scope} scope at '${targetPath}'.`);
     const result = await executeInstall(services.context, selectedPlugins, payload);
 
-
     if (result.success) {
         vscode.window.showInformationMessage(
             scope === 'workspace'
-                ? `Installed/updated ${selectedPlugins.length} plugin(s) in workspace (.agents/skills, .github/agents, .github/hooks, .github/mcp, .github/lsp).`
-                : `Installed/updated ${selectedPlugins.length} plugin(s) in user scope (~/.copilot/installed-plugins).`
+                ? workspaceSuccessMessage(selectedPlugins.length, targetPath, host)
+                : userSuccessMessage(selectedPlugins.length, host)
         );
         return;
     }
