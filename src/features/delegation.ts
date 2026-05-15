@@ -509,13 +509,54 @@ async function installConfigItem(
     await fallbackDownloadItemDescriptor(item, fallbackRoot);
 }
 
+/**
+ * Ensures `.gitignore` in the workspace root contains a pattern for each
+ * installed plugin's `.cursor/` subtree. Only appends entries that are not
+ * already present; creates the file if it does not exist.
+ *
+ * Pattern added per plugin: `.cursor/STAR/MARKETPLACE/PLUGIN/`
+ * The `*` wildcard covers all component types (skills, rules, agents, …).
+ */
+export async function ensureGitignoreEntries(workspaceRoot: string, plugins: MarketplacePlugin[]): Promise<void> {
+    const gitignorePath = path.join(workspaceRoot, '.gitignore');
+
+    let existing = '';
+    try {
+        existing = await fs.readFile(gitignorePath, 'utf8');
+    } catch {
+        // File does not exist yet — start with empty content.
+    }
+
+    const existingLines = new Set(existing.split(/\r?\n/));
+    const toAdd: string[] = [];
+
+    for (const plugin of plugins) {
+        const marketplace = getMarketplaceName(plugin.sourceUrl);
+        const pluginName = getPluginName(plugin);
+        const pattern = `.cursor/*/${marketplace}/${pluginName}/`;
+        if (!existingLines.has(pattern)) {
+            toAdd.push(pattern);
+        }
+    }
+
+    if (toAdd.length === 0) {
+        return;
+    }
+
+    const needsLeadingNewline = existing.length > 0 && !existing.endsWith('\n');
+    const appendix = (needsLeadingNewline ? '\n' : '') + toAdd.join('\n') + '\n';
+    await fs.appendFile(gitignorePath, appendix, 'utf8');
+}
+
 async function materializeLocalInstallStructure(workspaceRoot: string, plugins: MarketplacePlugin[]): Promise<void> {
     const host = getInstallHost();
     const installPromises: Promise<void>[] = [];
 
     for (const plugin of plugins) {
-        const pluginId = getPluginName(plugin);
-        const roots = resolveWorkspaceComponentRoots(workspaceRoot, pluginId, host);
+        const pluginBase = host === 'cursor'
+            ? path.join(getMarketplaceName(plugin.sourceUrl), getPluginName(plugin))
+            : getPluginName(plugin);
+        const roots = resolveWorkspaceComponentRoots(workspaceRoot, pluginBase, host);
         const { skillsRoot, rulesRoot, agentsRoot, hooksRoot, mcpRoot, lspRoot, commandsRoot, toolsRoot, promptsRoot, workflowsRoot } = roots;
 
         if (plugin.gitUrl) {
@@ -587,6 +628,10 @@ async function materializeLocalInstallStructure(workspaceRoot: string, plugins: 
     }
 
     await Promise.all(installPromises);
+
+    if (host === 'cursor') {
+        await ensureGitignoreEntries(workspaceRoot, plugins);
+    }
 }
 
 /**

@@ -1,4 +1,4 @@
-# Agent Plugins Browser
+# Agent Plugins Installer
 
 Browse one or more AI agent plugin marketplaces, select plugins, and install/update them directly.
 
@@ -55,13 +55,13 @@ Click any skill or agent item to open a detailed preview panel with:
 - LSP configs: `<workspace>/.github/lsp/...`
 - Commands, tools, prompts, workflows: `<workspace>/.github/{commands,tools,prompts,workflows}/...` (markdown or bundle directories)
 
-When the extension runs in **Cursor**, workspace installs use **`.cursor/<component>/<plugin-id>/`** for skills, rules, agents, hooks, MCP, LSP, commands, tools, prompts, and workflows instead of the `.agents` / `.github` layout above.
+When the extension runs in **Cursor**, workspace installs use **`.cursor/<component>/<marketplace-name>/<plugin-name>/`** for skills, rules, agents, hooks, MCP, LSP, commands, tools, prompts, and workflows instead of the `.agents` / `.github` layout above.
 
 ### Cursor and third-party marketplaces
 
 Cursor does not natively load plugins from third-party marketplace repositories the way it does for GitHub-hosted marketplaces. This extension bridges that gap for **user (global) installs** by placing unpacked plugins under **`~/.cursor/plugins/local/<plugin>`**, which Cursor treats as locally installed user plugins.
 
-For **workspace installs**, there is no separate “workspace plugin registry” path: the practical option is to lay out the plugin’s files under the workspace’s component directories (for example `.cursor/skills/…`, `.cursor/rules/…`, and the other layout described above). That means new files live inside your project tree, often as **untracked** changes. If you do not want those paths in version control, add the relevant directories or patterns to **`.gitignore`**.
+For **workspace installs**, there is no separate “workspace plugin registry” path: the practical option is to lay out the plugin’s files under the workspace’s component directories (for example `.cursor/skills/<marketplace-name>/<plugin-name>/…`, `.cursor/rules/<marketplace-name>/<plugin-name>/…`, and the other layout described above). That means new files live inside your project tree, often as **untracked** changes. If you do not want those paths in version control, add the relevant directories or patterns to **`.gitignore`**.
 
 **User scope:**
 

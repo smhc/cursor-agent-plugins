@@ -1,7 +1,10 @@
 import * as assert from 'assert';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { normalizeMarketplaceUrlInput, validateMarketplaceUrlInput } from '../features/config';
-import { buildInstallPayload } from '../features/delegation';
+import { buildInstallPayload, ensureGitignoreEntries } from '../features/delegation';
 import { fetchWithGitHubAuth } from '../features/github-auth';
 import { initLogger } from '../features/logger';
 import {
@@ -479,10 +482,13 @@ suite('Extension Test Suite', () => {
 	});
 
 	test('resolveWorkspaceComponentRoots returns .cursor paths for Cursor host', () => {
-		const roots = resolveWorkspaceComponentRoots('/workspace/my-repo', 'my-plugin', 'cursor');
+		// pluginBase is the pre-joined <marketplace>/<plugin> string the caller computes.
+		const roots = resolveWorkspaceComponentRoots('/workspace/my-repo', 'my-marketplace/my-plugin', 'cursor');
 		assert.ok(roots.skillsRoot.includes('.cursor'), 'skillsRoot should be under .cursor');
-		assert.ok(roots.skillsRoot.includes('my-plugin'), 'skillsRoot should include plugin id');
+		assert.ok(roots.skillsRoot.includes('my-marketplace'), 'skillsRoot should include marketplace segment');
+		assert.ok(roots.skillsRoot.includes('my-plugin'), 'skillsRoot should include plugin segment');
 		assert.ok(roots.rulesRoot.includes('.cursor'), 'rulesRoot should be under .cursor');
+		assert.ok(roots.rulesRoot.includes('my-marketplace'), 'rulesRoot should include marketplace segment');
 		assert.ok(roots.agentsRoot.includes('.cursor'), 'agentsRoot should be under .cursor');
 		assert.ok(roots.hooksRoot.includes('.cursor'), 'hooksRoot should be under .cursor');
 		assert.ok(roots.mcpRoot.includes('.cursor'), 'mcpRoot should be under .cursor');
@@ -514,5 +520,74 @@ suite('Extension Test Suite', () => {
 	test('resolveUserInstallRoot returns ~/.copilot/installed-plugins for legacy', () => {
 		const root = resolveUserInstallRoot('vscode');
 		assert.ok(root.includes('.copilot'), 'user root should be under .copilot for legacy host');
+	});
+
+	// ensureGitignoreEntries tests
+
+	function makeTestPlugin(id: string, sourceUrl: string): import('../features/marketplace').MarketplacePlugin {
+		return { id, name: id, groups: [], sourceUrl, marketplaceDocumentUrl: sourceUrl, raw: {} };
+	}
+
+	test('ensureGitignoreEntries creates .gitignore with pattern when file does not exist', async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursor-plugin-test-'));
+		try {
+			await ensureGitignoreEntries(tmpDir, [makeTestPlugin('my-plugin', 'https://github.com/my-org/cursor-marketplace/marketplace.json')]);
+
+			const content = await fs.readFile(path.join(tmpDir, '.gitignore'), 'utf8');
+			assert.ok(content.includes('.cursor/*/cursor-marketplace/my-plugin/'), 'should contain the plugin pattern');
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test('ensureGitignoreEntries appends pattern to existing .gitignore', async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursor-plugin-test-'));
+		try {
+			const gitignorePath = path.join(tmpDir, '.gitignore');
+			await fs.writeFile(gitignorePath, 'node_modules/\ndist/\n', 'utf8');
+
+			await ensureGitignoreEntries(tmpDir, [makeTestPlugin('my-plugin', 'https://github.com/my-org/cursor-marketplace/marketplace.json')]);
+
+			const content = await fs.readFile(gitignorePath, 'utf8');
+			assert.ok(content.includes('node_modules/'), 'should retain existing entries');
+			assert.ok(content.includes('dist/'), 'should retain existing entries');
+			assert.ok(content.includes('.cursor/*/cursor-marketplace/my-plugin/'), 'should append the plugin pattern');
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test('ensureGitignoreEntries does not duplicate an existing pattern', async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursor-plugin-test-'));
+		try {
+			const gitignorePath = path.join(tmpDir, '.gitignore');
+			await fs.writeFile(gitignorePath, 'node_modules/\n.cursor/*/cursor-marketplace/my-plugin/\n', 'utf8');
+
+			await ensureGitignoreEntries(tmpDir, [makeTestPlugin('my-plugin', 'https://github.com/my-org/cursor-marketplace/marketplace.json')]);
+
+			const content = await fs.readFile(gitignorePath, 'utf8');
+			const occurrences = (content.match(/\.cursor\/\*\/cursor-marketplace\/my-plugin\//g) ?? []).length;
+			assert.strictEqual(occurrences, 1, 'pattern should appear exactly once (no duplicate)');
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test('ensureGitignoreEntries adds separate patterns for multiple plugins', async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cursor-plugin-test-'));
+		try {
+			const plugins = [
+				makeTestPlugin('plugin-a', 'https://github.com/my-org/cursor-marketplace/marketplace.json'),
+				makeTestPlugin('plugin-b', 'https://github.com/my-org/cursor-marketplace/marketplace.json'),
+			];
+
+			await ensureGitignoreEntries(tmpDir, plugins);
+
+			const content = await fs.readFile(path.join(tmpDir, '.gitignore'), 'utf8');
+			assert.ok(content.includes('.cursor/*/cursor-marketplace/plugin-a/'), 'should contain pattern for plugin-a');
+			assert.ok(content.includes('.cursor/*/cursor-marketplace/plugin-b/'), 'should contain pattern for plugin-b');
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 });
