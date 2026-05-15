@@ -2,7 +2,7 @@
   "name": "agent-plugins-installer",
   "displayName": "Agent Plugins Installer",
   "description": "Install plugins from custom agent marketplaces. Support for repository urls and github owner/repo shorthands.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "preview": true,
   "author": {
     "name": "Tim Heuer",

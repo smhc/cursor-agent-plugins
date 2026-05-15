@@ -6,6 +6,16 @@ This repository is a fork of [timheuer/vscode-agent-plugins](https://github.com/
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.2]
+
+### Added
+
+- **`.gitignore` for Cursor marketplace workspace installs** — After a Cursor-host marketplace install, append per-plugin ignore patterns for the installed `.cursor` tree (new file, append, deduplication, and multiple plugins covered by tests).
+
+### Changed
+
+- **Cursor workspace install paths** — Workspace-scoped Cursor components are rooted under `.cursor` using marketplace and plugin path segments (see README for the updated layout); delegation and extension tests updated accordingly.
+
 ## [0.0.1]
 
 ### Added

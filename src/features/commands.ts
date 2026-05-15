@@ -74,8 +74,8 @@ async function loadMarketplaceViewModel(
 
 export async function addMarketplaceUrl({ logger, reloadMarketplaceExplorer }: ExtensionServices): Promise<void> {
     const input = await vscode.window.showInputBox({
-        prompt: 'Enter a marketplace URL or GitHub owner/repo',
-        placeHolder: 'anthropics/skills or https://example.com/marketplace.json',
+        prompt: 'Enter a marketplace.json URL, an HTTPS git repository URL, or GitHub owner/repo.',
+        placeHolder: 'anthropics/skills, https://github.com/org/repo, or https://example.com/marketplace.json',
         ignoreFocusOut: true,
         validateInput: validateMarketplaceUrlInput
     });
