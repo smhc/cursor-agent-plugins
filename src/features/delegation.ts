@@ -514,8 +514,10 @@ async function materializeLocalInstallStructure(workspaceRoot: string, plugins: 
     const installPromises: Promise<void>[] = [];
 
     for (const plugin of plugins) {
-        const pluginId = getPluginName(plugin);
-        const roots = resolveWorkspaceComponentRoots(workspaceRoot, pluginId, host);
+        const pluginBase = host === 'cursor'
+            ? path.join(getMarketplaceName(plugin.sourceUrl), getPluginName(plugin))
+            : getPluginName(plugin);
+        const roots = resolveWorkspaceComponentRoots(workspaceRoot, pluginBase, host);
         const { skillsRoot, rulesRoot, agentsRoot, hooksRoot, mcpRoot, lspRoot, commandsRoot, toolsRoot, promptsRoot, workflowsRoot } = roots;
 
         if (plugin.gitUrl) {

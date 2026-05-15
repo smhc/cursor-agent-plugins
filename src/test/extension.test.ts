@@ -479,10 +479,13 @@ suite('Extension Test Suite', () => {
 	});
 
 	test('resolveWorkspaceComponentRoots returns .cursor paths for Cursor host', () => {
-		const roots = resolveWorkspaceComponentRoots('/workspace/my-repo', 'my-plugin', 'cursor');
+		// pluginBase is the pre-joined <marketplace>/<plugin> string the caller computes.
+		const roots = resolveWorkspaceComponentRoots('/workspace/my-repo', 'my-marketplace/my-plugin', 'cursor');
 		assert.ok(roots.skillsRoot.includes('.cursor'), 'skillsRoot should be under .cursor');
-		assert.ok(roots.skillsRoot.includes('my-plugin'), 'skillsRoot should include plugin id');
+		assert.ok(roots.skillsRoot.includes('my-marketplace'), 'skillsRoot should include marketplace segment');
+		assert.ok(roots.skillsRoot.includes('my-plugin'), 'skillsRoot should include plugin segment');
 		assert.ok(roots.rulesRoot.includes('.cursor'), 'rulesRoot should be under .cursor');
+		assert.ok(roots.rulesRoot.includes('my-marketplace'), 'rulesRoot should include marketplace segment');
 		assert.ok(roots.agentsRoot.includes('.cursor'), 'agentsRoot should be under .cursor');
 		assert.ok(roots.hooksRoot.includes('.cursor'), 'hooksRoot should be under .cursor');
 		assert.ok(roots.mcpRoot.includes('.cursor'), 'mcpRoot should be under .cursor');

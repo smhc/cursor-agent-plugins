@@ -40,31 +40,34 @@ export interface WorkspaceComponentRoots {
 
 /**
  * Resolves the install roots for each component type given a workspace
- * folder root, a sanitised plugin id, and the active host profile.
+ * folder root, a two-segment plugin base path, and the active host profile.
  *
- * Cursor  → workspace/.cursor/<component>/<pluginId>/
+ * Cursor  → workspace/.cursor/<component>/<marketplace_name>/<plugin_name>/
  * Legacy  → workspace/.agents/skills/  and  workspace/.github/{agents,hooks,mcp,lsp,commands,tools,prompts,workflows}/
  *           (rules have no legacy equivalent and are simply skipped on
  *           legacy hosts — the caller should check rulesRoot only on Cursor)
+ *
+ * @param pluginBase  For Cursor: a pre-joined `<marketplace_name>/<plugin_name>` string.
+ *                    For legacy hosts: ignored.
  */
 export function resolveWorkspaceComponentRoots(
     workspaceRoot: string,
-    pluginId: string,
+    pluginBase: string,
     host: InstallHost
 ): WorkspaceComponentRoots {
     if (host === 'cursor') {
         const cursorRoot = path.join(workspaceRoot, '.cursor');
         return {
-            skillsRoot: path.join(cursorRoot, 'skills', pluginId),
-            rulesRoot:  path.join(cursorRoot, 'rules',  pluginId),
-            agentsRoot: path.join(cursorRoot, 'agents', pluginId),
-            hooksRoot:  path.join(cursorRoot, 'hooks',  pluginId),
-            mcpRoot:    path.join(cursorRoot, 'mcp',    pluginId),
-            lspRoot:    path.join(cursorRoot, 'lsp',    pluginId),
-            commandsRoot: path.join(cursorRoot, 'commands', pluginId),
-            toolsRoot: path.join(cursorRoot, 'tools', pluginId),
-            promptsRoot: path.join(cursorRoot, 'prompts', pluginId),
-            workflowsRoot: path.join(cursorRoot, 'workflows', pluginId),
+            skillsRoot:   path.join(cursorRoot, 'skills',    pluginBase),
+            rulesRoot:    path.join(cursorRoot, 'rules',     pluginBase),
+            agentsRoot:   path.join(cursorRoot, 'agents',    pluginBase),
+            hooksRoot:    path.join(cursorRoot, 'hooks',     pluginBase),
+            mcpRoot:      path.join(cursorRoot, 'mcp',       pluginBase),
+            lspRoot:      path.join(cursorRoot, 'lsp',       pluginBase),
+            commandsRoot: path.join(cursorRoot, 'commands',  pluginBase),
+            toolsRoot:    path.join(cursorRoot, 'tools',     pluginBase),
+            promptsRoot:  path.join(cursorRoot, 'prompts',   pluginBase),
+            workflowsRoot: path.join(cursorRoot, 'workflows', pluginBase),
         };
     }
 
